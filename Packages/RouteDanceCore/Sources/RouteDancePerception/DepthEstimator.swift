@@ -49,6 +49,29 @@ public final class DepthEstimator: @unchecked Sendable {
         throw LoadError.modelNotFound(name)
     }
 
+    /// バンドル内のモデルのうち、入力のアスペクト比（幅/高さ）に最も近いものを選ぶ。
+    /// 超広角の縦持ち（9:16）を3:4のモデルに中央クロップすると上下が大きく切れるので、9:16 や 16:9 のモデルがあればそちらを使う。
+    /// 見つからなければ `bundled(portrait:)` と同じモデルにフォールバックする。
+    public static func bundled(aspect: Double, in bundle: Bundle = .main) throws -> DepthEstimator {
+        // (名前, 幅/高さ)。3:4 と 4:3 は既存、9:16 と 16:9 は追加モデル。
+        let candidates: [(String, Double)] = [
+            ("MoGe2S_9x16", 9.0 / 16), ("MoGe2S", 3.0 / 4), ("MoGe2S_landscape", 4.0 / 3), ("MoGe2S_16x9", 16.0 / 9),
+        ]
+        for (name, _) in candidates.sorted(by: { abs(log($0.1 / aspect)) < abs(log($1.1 / aspect)) }) {
+            if let url = modelURL(name, in: bundle) { return try DepthEstimator(url: url) }
+        }
+        return try bundled(portrait: aspect < 1, in: bundle)
+    }
+
+    private static func modelURL(_ name: String, in bundle: Bundle) -> URL? {
+        for ext in ["mlmodelc", "mlpackage"] {
+            if let url = bundle.url(forResource: name, withExtension: ext) ?? bundle.url(forResource: name, withExtension: ext, subdirectory: "Models") {
+                return url
+            }
+        }
+        return nil
+    }
+
     /// 正立した画像（CIImage、原点は左下）から深度を推定する。
     public func estimate(_ image: CIImage, timestamp: Double, knownHorizontalFOV: Double? = nil) throws -> Output {
         let t0 = DispatchTime.now().uptimeNanoseconds

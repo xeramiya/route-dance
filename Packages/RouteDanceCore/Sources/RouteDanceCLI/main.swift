@@ -22,8 +22,18 @@ let inputURL = URL(fileURLWithPath: args[1])
 let maxFrames = Int(option("--frames") ?? "90") ?? 90
 
 @Sendable func loadDepth(portrait: Bool) throws -> DepthEstimator {
+    try loadDepth(name: portrait ? "MoGe2S" : "MoGe2S_landscape")
+}
+
+/// 入力のアスペクト比（幅/高さ）に最も近いモデル。
+@Sendable func loadDepth(aspect: Double) throws -> DepthEstimator {
+    let candidates: [(String, Double)] = [("MoGe2S_9x16", 9.0 / 16), ("MoGe2S", 3.0 / 4), ("MoGe2S_landscape", 4.0 / 3), ("MoGe2S_16x9", 16.0 / 9)]
+    let best = candidates.min { abs(log($0.1 / aspect)) < abs(log($1.1 / aspect)) }!
+    return try loadDepth(name: best.0)
+}
+
+@Sendable func loadDepth(name: String) throws -> DepthEstimator {
     let modelsDir = URL(fileURLWithPath: option("--models") ?? "../../Models")
-    let name = portrait ? "MoGe2S" : "MoGe2S_landscape"
     let cache = FileManager.default.temporaryDirectory.appendingPathComponent("routedance-\(name).mlmodelc")
     if FileManager.default.fileExists(atPath: cache.path) {
         return try DepthEstimator(url: cache)
@@ -60,7 +70,7 @@ func describe(_ f: ProcessedFrame) {
     }
 }
 
-let processor = FrameProcessor(loadDepth: { try loadDepth(portrait: $0) })
+let processor = FrameProcessor(loadDepth: { try loadDepth(portrait: $0) }, loadDepthForAspect: { try loadDepth(aspect: $0) })
 
 let ext = inputURL.pathExtension.lowercased()
 if ["jpg", "jpeg", "png", "heic"].contains(ext) {

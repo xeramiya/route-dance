@@ -58,6 +58,8 @@ public actor FrameProcessor {
     private let detector: any PersonDetector
     private var depthEstimators: [Bool: DepthEstimator] = [:]
     private let loadDepth: @Sendable (Bool) throws -> DepthEstimator
+    /// 入力のアスペクト比（幅/高さ）に最も近いモデルを読む。nil なら縦横だけで選ぶ。
+    private let loadDepthForAspect: (@Sendable (Double) throws -> DepthEstimator)?
     private var depthTask: Task<DepthEstimator.Output?, Never>?
     private var pendingDepth: (output: DepthEstimator.Output, width: Int, height: Int)?
     private var lastDepthStart = -Double.infinity
@@ -75,11 +77,13 @@ public actor FrameProcessor {
     public init(
         config: Config = Config(),
         detector: any PersonDetector = VisionPersonDetector(),
-        loadDepth: @escaping @Sendable (Bool) throws -> DepthEstimator = { try DepthEstimator.bundled(portrait: $0) }
+        loadDepth: @escaping @Sendable (Bool) throws -> DepthEstimator = { try DepthEstimator.bundled(portrait: $0) },
+        loadDepthForAspect: (@Sendable (Double) throws -> DepthEstimator)? = { try DepthEstimator.bundled(aspect: $0) }
     ) {
         self.config = config
         self.detector = detector
         self.loadDepth = loadDepth
+        self.loadDepthForAspect = loadDepthForAspect
     }
 
     public func reset() {
@@ -146,6 +150,8 @@ public actor FrameProcessor {
         let portrait = height >= width
         let cached = depthEstimators[portrait]
         let load = loadDepth
+        let loadAspect = loadDepthForAspect
+        let aspect = Double(width) / Double(height)
         lastDepthStart = timestamp
         // モデルの読み込み（初回は数秒）と推論は actor の外で行い、フレーム処理を止めない。
         let task = Task.detached(priority: .userInitiated) { () -> (DepthEstimator?, DepthEstimator.Output?, String?) in
@@ -154,7 +160,7 @@ public actor FrameProcessor {
                 estimator = cached
             } else {
                 do {
-                    estimator = try load(portrait)
+                    estimator = try (try? loadAspect?(aspect)) ?? load(portrait)
                 } catch {
                     return (nil, nil, "深度モデルを読み込めません: \(error)")
                 }

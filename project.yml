@@ -36,6 +36,11 @@ targets:
         optional: true
       - path: Models/MoGe2S_landscape.mlpackage
         optional: true
+      # 超広角の縦持ち（9:16）と横持ち（16:9）を、クロップせずに入れるためのモデル。
+      - path: Models/MoGe2S_9x16.mlpackage
+        optional: true
+      - path: Models/MoGe2S_16x9.mlpackage
+        optional: true
     dependencies:
       - package: RouteDanceCore
         product: RouteDanceCore
@@ -68,6 +73,11 @@ targets:
       - path: Models/MoGe2S.mlpackage
         optional: true
       - path: Models/MoGe2S_landscape.mlpackage
+        optional: true
+      # 超広角の縦持ち（9:16）と横持ち（16:9）を、クロップせずに入れるためのモデル。
+      - path: Models/MoGe2S_9x16.mlpackage
+        optional: true
+      - path: Models/MoGe2S_16x9.mlpackage
         optional: true
     dependencies:
       - package: RouteDanceCore
