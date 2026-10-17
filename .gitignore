@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved.bak
+
+# Models / large artifacts (配布元から取得する。必要ならGit LFSで管理)
+*.mlpackage/
+*.mlmodel
+*.mlmodelc/
+
+# Evaluation data
+EvalData/
+*.mov
+*.mp4
+
+# Python (モデル変換スクリプト用)
+__pycache__/
+*.pyc
+.venv/
