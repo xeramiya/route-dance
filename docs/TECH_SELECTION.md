@@ -1,28 +1,33 @@
-# 技術選定（レビュー用）
+# 技術選定
 
-> ステータス: **レビュー待ち**
+> ステータス: **確定（v1）**。§11に決定事項
 > 調査日: 2026-10-17
 > 関連: [SPEC.md](SPEC.md)
 
 ## 0. 結論（TL;DR）
 
-| レイヤ | 採用（第1候補） | 代替 / 将来 |
-| --- | --- | --- |
-| 言語・UI | Swift 6 / SwiftUI（iOS + macOSマルチプラットフォーム） | — |
-| 自己位置・姿勢 | **ARKit** `ARWorldTrackingConfiguration`（6DoF、重力整列ワールド座標） | 動画入力時は記録済みの姿勢、または単眼推定 |
-| 深度 | **LiDAR `sceneDepth`**（〜5m）＋**地面平面への足元レイキャスト**（遠距離） | `personSegmentationWithDepth`（非LiDAR機）、Depth Anything V2 Small（Apache-2.0） |
-| 人物検出 | **Vision `DetectHumanRectanglesRequest`**（OS標準、iOS/macOS共通、ライセンス問題なし） | YOLOX（Apache-2.0）/ MIT版YOLO（MultimediaTechLab/YOLO）をCore ML化 |
-| 追跡 | **ByteTrack方式を自前Swift実装**（地面座標のカルマンフィルタ＋2段階マッチング） | OC-SORTの観測中心の再更新を追加 |
-| 軌道予測 | **等速度モデル(CVM)＋不確かさ拡大＋多峰サンプリング**（物理ベース、Phase 1） | Core ML化した学習モデル（EqMotion / Trajectron++ / MoFlow、すべてMIT）をPhase 2で比較 |
-| 予測ホライズンN | **最接近時刻(t_CPA)ベースの可変N**（仕様の d/v を一般化） | 仕様どおりの d/v（設定で切替可能にする） |
-| 経路計画 | **一定速度でのサンプリング型経路探索＋サンプルベースの衝突確率**（DWA/lattice系） | MPPIでの局所改善、PGIF型の異方性リスク場 |
-| 減速区間 | **パス-速度分解（ST-graph上のDP）** で速度プロファイルを求め、色分けする | — |
-| 描画 | Metal（`MTKView`）でカメラ映像＋デバッグ加工、SwiftUI `Canvas`でオーバーレイ | 重くなったらオーバーレイもMetal化 |
-| 動画評価 | **アプリ内の記録モード**（映像＋ARKit姿勢・内部パラメータ・深度を保存）→ iPhone/Macで同一パイプラインで再生 | 写真ライブラリの任意動画は「単眼モード」（精度は落ちる） |
-| Mac | **同一コード・同一UIで動かせる**（ARKitだけ`#if os(iOS)`で分離） | `swift test`によるヘッドレス評価（ADE/FDEなど） |
-| プロジェクト管理 | XcodeGen（`project.yml`をGit管理）＋ローカルSwift Package | Xcodeのフォルダ同期のみ |
+> 2026-10-17のレビューで確定した内容を反映済み（§11に決定事項の一覧）。
 
-**Macでのテストは「できる」と判断しました。** 理由は、ARKitを使うのは「センサ入力」の部分だけで、検出（Vision）、Core ML、追跡・予測・計画（純Swift）、描画（Metal/SwiftUI）はすべてmacOSでも動くからです。最初から入力層を抽象化しておけば、追加コストは小さく済みます（§6）。
+| レイヤ | 採用 | 代替 / 将来 |
+| --- | --- | --- |
+| 言語・UI | Swift 6 / SwiftUI。iOS 27とmacOS 27の2つのアプリターゲットでコードを共有 | — |
+| 深度・空間 | **単眼メトリック深度 MoGe-2 ViT-S（MIT、35M）をCore ML化**。カメラの画角も推定するので、内部パラメータが不明な動画でも使える | Depth Anything V2 Metric Small、Depth Anything 3 Small（Apache-2.0） |
+| 地面 | **深度の点群から地面平面をRANSACで推定**（カメラ高さとカメラの傾きが得られる） | 深度がないときは「高さ1.45m＋重力方向」を仮定 |
+| 自己位置 | **画像オドメトリ**（地面上の点をオプティカルフローで追い、俯瞰座標でSE(2)をRANSAC推定）。ライブも動画も同じ処理。ライブではCoreMotionのジャイロと重力で補う | 比較用にARKitの姿勢を使うモード（未定） |
+| 人物検出 | **Vision `DetectHumanRectanglesRequest`**（OS標準、iOS/macOS共通） | YOLOX（Apache-2.0）/ MIT版YOLOをCore ML化 |
+| 人物の位置 | **足元レイと地面の交点**と**深度の中央値**を分散で重み付けして統合。足元が画面外なら頭の位置と身長の事前分布を使う | — |
+| 追跡 | **ByteTrack方式を自前Swift実装**（地面座標のカルマンフィルタ＋ハンガリアン法で2段階マッチング） | OC-SORTの再更新を追加 |
+| 軌道予測 | **等速度モデル(CVM)＋決定論的な多峰サンプル**（Phase 1） | 学習モデル（EqMotion / MoFlow / Trajectron++、すべてMIT）をPhase 2で比較 |
+| 予測ホライズンN | **最接近時刻(CPA)ベースの可変N**（これのみ） | — |
+| ゴール | **端末が向いている方向の、地面上で見える最も遠い点** | 地図で指定した目的地へ、道のりに沿って案内（`GoalProvider`を差し替える） |
+| 経路計画 | **現在速度で約5秒先までのサンプリング型経路探索＋サンプルベースの衝突確率** | MPPIでの局所改善、PGIF型の異方性リスク場 |
+| 減速区間 | **パス-速度分解（ST-graph上のDP）** で速度プロファイルを求め、緑・黄・赤で表示 | — |
+| 描画 | Metal（`MTKView`）でカメラ映像を描き、デバッグ時は白っぽく加工。オーバーレイはSwiftUI `Canvas` | — |
+| 動画入力 | **普通の動画**（写真ライブラリ / Macではファイル）を、ライブと同じパイプラインで処理する | — |
+| Mac | 同じUI・同じアルゴリズムで動画を処理。コアは`swift test`でヘッドレスに検証 | — |
+| プロジェクト管理 | XcodeGen（`project.yml`をGit管理）＋ローカルSwift Package | — |
+
+**方針の要点**: 空間認識をすべて「画像だけ」から行う（深度・地面・自己位置）。そうすることで、ライブ映像と事前に撮影した普通の動画が**同じ処理経路**を通る。LiDARとARKitの深度は使わない。
 
 ---
 
@@ -42,64 +47,76 @@
 
 ---
 
-## 2. 空間認識（他歩行者の3D位置）
+## 2. 空間認識（画像のみから）
 
-### 2.1 ARKit ✅
+### 2.0 方針の変更（2026-10-17）
 
-| 機能 | 対応 | 本アプリでの使い道 |
-| --- | --- | --- |
-| `ARWorldTrackingConfiguration` | iOS 11+（**macOS・Mac Catalyst非対応**） | カメラの6DoF姿勢。重力に揃ったワールド座標が得られ、ユーザー速度もここから求める |
-| `ARFrame.sceneDepth` / `smoothedSceneDepth` | iOS 14+、LiDAR機のみ | 近距離（目安〜5m）の人物までの距離 |
-| `personSegmentationWithDepth`（`segmentationBuffer`、`estimatedDepthData`） | iOS 13+、A12以降 | 非LiDAR機での人物マスクと推定深度 |
-| `sceneReconstruction` | iOS 13.4+、LiDAR | 静的障害物（壁・柱）。Phase 2以降 |
-| `ARBodyTrackingConfiguration` | iOS 13+ | **不採用**: 追跡できるのは1人だけで、複数の他歩行者に使えない |
+- 当初はLiDARとARKitを主軸にしていたが、次の2点から**画像だけで空間を推定する**方針に変えた。
+  - LiDARは精度が足りない。
+  - 事前に撮影した普通の動画でも、同じ処理で動かしたい。
+- 深度・地面・自己位置の3つをすべて画像から推定する。ライブ映像と動画が同じ処理経路を通るので、評価結果がそのままライブの性能を表す。
 
-### 2.2 人物検出
+### 2.1 単眼メトリック深度 ✅
+
+| 候補 | ライセンス | 規模 | 出力 | 評価 |
+| --- | --- | --- | --- | --- |
+| **MoGe-2 ViT-S**（CVPR'25 Oral系、`Ruicheng/moge-2-vits-normal`） | ✅ MIT（DINOv2部分はApache-2.0） | 35M | メトリック点群、深度、**カメラFOV**、法線 | **採用**。画角も推定するので、焦点距離が不明な動画でも使える。Core ML化は自前（⚠️ 変換と速度は検証中） |
+| MoGe-2 ViT-B | ✅ MIT | 104M | 同上 | 精度を優先するときの候補 |
+| Depth Anything 3 Small / Base | ✅ Apache-2.0 | 80M / 120M | 相対深度、姿勢 | メトリック版はLargeのみ（350M）で重い |
+| Depth Anything V2 Metric Outdoor Small | ⚠️ HF上にライセンスタグなし（元のSmallはApache-2.0） | 25M | メトリック深度 | Plan B。画角は推定しない |
+| apple/coreml-depth-anything-v2-small | ✅ Apache-2.0 | 25M | **相対**深度 | 変換済みで速い（iPhone 15 Pro Maxで約34ms）。スケールは地面から復元する必要あり |
+| Metric-Video-Depth-Anything-Small | ✅ Apache-2.0 | — | メトリック、時間方向に安定 | 動画向けで有望。Core ML化は ⚠️ |
+| Depth Pro | ✅ apple-amlr（研究用途） | 大 | メトリック | **不採用**（ライセンス） |
+| UniDepth / CUT3R / MoGe以外の多くのモデル | ✅ ライセンス表記なし、または不明確 | — | — | **不採用** |
+| DA3 Nested Giant | ✅ CC-BY-NC-4.0 | — | — | **不採用**（非商用） |
+
+- 深度は5Hz程度で推定する。間のフレームは、自己位置推定の結果で前回の深度をずらして使う。
+- 単眼深度の絶対スケールは誤差が数%〜十数%ある。そのため、**地面平面から得たカメラ高さ**を時間方向に平滑化し、スケールを安定させる補正に使う。
+
+### 2.2 地面平面とカメラ姿勢
+
+- 深度の点群の画面下半分からRANSACで平面を当てはめ、地面の法線（＝重力方向の推定値）とカメラ高さhを得る。
+- 法線の向きは、ライブではCoreMotionの重力ベクトルで照合・補正する（動画では使えないので、画像だけで推定する）。
+- hは指数移動平均で平滑化する。外れ値（段差、人で地面が隠れる）は棄却する。妥当な範囲は1.0〜1.8m。
+- 地面座標系: 原点はカメラ直下の地面、Y軸は上向き、Z軸はカメラの前方を地面に投影した向き。
+
+### 2.3 自己位置（ユーザーの移動）
+
+- **画像オドメトリ（自前実装）**:
+  1. 地面マスク（平面からの距離が小さい画素）上の特徴点を、Visionのオプティカルフロー（`TrackOpticalFlowRequest`、✅ iOS 18+/macOS 15+）、またはLucas-Kanadeで追跡する。
+  2. 各点を深度と地面平面で**俯瞰座標 (x, z)** に変換する。
+  3. 前後のフレーム間の剛体変換SE(2)（回転θと並進）をRANSAC＋最小二乗で推定する。
+  4. 人物の枠の内側の点は除外する（他歩行者の動きを自分の動きと誤認しないため）。
+- 回転は、ライブではCoreMotionのジャイロを優先し、画像推定と融合する。
+- ユーザー速度は、並進を1〜1.5秒の窓で平滑化して求める。歩行の周期的な揺れは平滑化で消す。
+- ライブ映像は`AVCaptureSession`で取り、ARKitは使わない。比較用にARKitの姿勢を使うモードは必要になったら検討する。
+
+### 2.4 人物検出
 
 | 候補 | ライセンス | iOS / macOS | 評価 |
 | --- | --- | --- | --- |
-| **Vision `DetectHumanRectanglesRequest`**（Swift API、iOS 18+） / `VNDetectHumanRectanglesRequest`（iOS 13+） | OS標準 | ✅ 両方 | **第1候補**。追加モデル不要で、Macでも同じ結果。遠くの小さな人物の検出率は ⚠️ 実機で要確認 |
-| Ultralytics YOLO11 / YOLOv8 | ✅ **AGPL-3.0**（HF上のYOLO11もAGPL） | Core ML出力あり | **不採用**。アプリ全体をAGPLで公開するか、Enterpriseライセンスの購入が必要 |
-| YOLOv10 / YOLOv12 | ✅ AGPL-3.0 | — | 同上で不採用 |
-| YOLOX | ✅ Apache-2.0 | 純CNNなのでCore ML化は容易 ⚠️ | **Plan B** |
-| MultimediaTechLab/YOLO（YOLOv9系をMITで再実装） | ✅ MIT | ⚠️ | Plan B |
-| RF-DETR / D-FINE / RT-DETR | ✅ Apache-2.0 | DETR系はCore ML変換で詰まる可能性あり ⚠️ | 精度が足りないときの候補 |
-| apple/coreml-YOLOv3 | ✅ MIT | 変換済み | 古いので比較用 |
+| **Vision `DetectHumanRectanglesRequest`** | OS標準 | ✅ 両方 | **採用**。全身・上半身を検出。遠くの小さな人物の検出率は ⚠️ 要検証 |
+| Ultralytics YOLO11 / YOLOv8 / v10 / v12 | ✅ AGPL-3.0 | — | **不採用** |
+| YOLOX | ✅ Apache-2.0 | ⚠️ | Plan B |
+| MultimediaTechLab/YOLO（YOLOv9系のMIT再実装） | ✅ MIT | ⚠️ | Plan B |
+| RF-DETR / D-FINE / RT-DETR | ✅ Apache-2.0 | ⚠️ | 精度が足りないときの候補 |
 
 検出器は`PersonDetector`プロトコルの裏に隠し、差し替えられるようにする。
 
-### 2.3 3D位置推定（深度の統合）
+### 2.5 人物の地面位置
 
-人物の位置は**足元の地面上の点 (x, z)** として表す。
+1. **足元レイ**: 枠の下端中央から光線を飛ばし、地面平面と交差させる。枠が画面下端に接している（足元が切れている）ときは使わない。
+2. **深度**: 枠の中央の縦帯の深度の中央値に、体の厚みの半分（約0.15m）を足す。
+3. **身長の事前分布**: 枠の上端（頭）と、平均身長1.65m±0.1mから推定する（足元が切れているときの補助）。
+4. 各方法の分散で重み付けして統合する。距離が遠いほど、足元レイの分散が大きくなる（角度誤差が距離の2乗で効く）。
 
-1. **近距離（LiDARの範囲内）**: 検出枠内の`sceneDepth`（人物マスクと重なる画素に限定）の中央値を使う。
-2. **遠距離**: 検出枠の下端中央（足元）から光線を飛ばし、地面平面と交差させる。地面の高さはARKitの水平平面検出か、カメラ高さの推定値から得る。距離に上限がなく、**動画入力でも同じ方法が使える**のが利点。
-3. 両方が使える距離帯では、分散で重み付けして統合する。
+### 2.6 追跡（MOT）
 
-単眼深度（動画入力・非LiDAR機向けの補助）:
-
-| 候補 | ライセンス | 備考 |
-| --- | --- | --- |
-| apple/coreml-depth-anything-v2-small | ✅ Apache-2.0 | Apple公式のCore ML変換版。F16で約50MB。iPhone 15 Pro Maxで約34ms（ANE）。出力は**相対深度** |
-| Depth Anything V2 Base/Large/Giant | ✅ CC-BY-NC-4.0 | **非商用のため不採用** |
-| Metric-Video-Depth-Anything-Small | ✅ Apache-2.0 | メートル単位で時間方向に安定。ただしCore ML変換は自前 ⚠️ |
-| Apple Depth Pro | ✅ apple-amlrライセンス（研究用途向け） | **アプリ組み込みは不採用**。Macでの評価用の参照としてのみ検討 |
-
-### 2.4 追跡（MOT）
-
-- Swift製の成熟したByteTrack/OC-SORT実装はGitHubで見つからなかった（✅ 検索で確認）。元実装はByteTrack・OC-SORT・BoT-SORTとも ✅ MIT。
-- **自前で実装する**（数百行の規模）。
-  - 状態は**ワールドの地面座標**上の位置・速度（定速カルマンフィルタ）。画像座標ではなくワールド座標で追うので、ユーザーの移動やカメラの揺れの影響を受けにくい。
-  - マッチングはByteTrack方式: 高スコア検出→低スコア検出の2段階。コストは画像IoUとワールド距離の組み合わせ。
-  - OC-SORTの、見失いから戻ったときの再更新（ORU）を後から追加する。
-
-### 2.5 ユーザーの歩行速度
-
-- ARKitのカメラ位置を水平面に投影して微分し、平滑化する（歩行の上下動や手ブレを除くため、1〜2秒の窓で処理）。
-- 補助として`CMPedometer.currentPace`（✅ iOS/macOSのAPI）を使う。
-- 進行方向は**移動方向**（速度ベクトル）で決め、カメラの向きとは区別する。
-
----
+- Swift製の成熟したByteTrack/OC-SORT実装は見つからなかった。元実装はいずれも ✅ MIT。
+- **自前で実装する**:
+  - 状態は**地面座標**上の位置・速度（定速カルマンフィルタ）。
+  - 毎フレーム、自己位置の変化（SE(2)）で全トラックを現在の座標系に変換する。
+  - マッチングはByteTrack方式で、高スコア検出→低スコア検出の2段階。コストは地面距離のマハラノビス距離と画像IoUの組み合わせ。割り当てはハンガリアン法。
 
 ## 3. 軌道予測
 
@@ -158,7 +175,8 @@ N_i = clamp(t_cpa + τ, N_min, N_max)      例: τ = 1.0s, N_min = 1.0s, N_max =
 - これは仕様の考え方（近い人は短く、遠い人は長く）を、相対速度を考慮する形に一般化したもの。衝突回避の分野で標準的なTTC/CPAの考え方に沿っている（📚 Karamouzas et al., PRL 2014「歩行者の相互作用はTTCのべき乗則に従う」、📚 ORCA / Velocity Obstacles）。
 - N_maxは予測の信頼限界で決める。σ(t)が大きくなりすぎると予測が意味を持たなくなるためで、ETH/UCYの標準である4.8秒も参考にする。
 - 関連研究として、✅ 2603.00507（2026年、プレプリント）が、社会的文脈に応じてMPCのホライズンを学習でオンラインに選ぶ手法を提案している。重いのでPhase 1では使わない。
-- 実装: 内部の衝突評価は全員について計画ホライズン T_plan まで行う（CVMなら軽い）。N_iは**表示範囲と影響範囲**に使う。設定ドロワーで「d/v方式」と「CPA方式」を切り替えて比較できるようにする。
+- 実装: 衝突評価は全員について計画ホライズン T_plan（5秒）まで行う（CVMなら軽い）。N_iは**表示範囲と影響範囲**に使う。
+- 決定: CPA方式のみを実装する（d/v方式は残さない）。
 
 ---
 
@@ -167,20 +185,24 @@ N_i = clamp(t_cpa + τ, N_min, N_max)      例: τ = 1.0s, N_min = 1.0s, N_max =
 ### 4.1 要件の整理
 
 - ユーザーの**現在の歩行速度 v で辿れる経路**を出す → 速度は固定し、**向き（曲率）の列だけを探索**する。
+- 表示する長さは**約5秒先まで**（T_plan = 5s。経路長は v·T_plan）。停止中も経路が見えるよう、計画に使う速度には下限 v_min = 0.5 m/s を設ける。
 - それでも避けられない場合だけ減速する → 減速区間を黄〜赤で示す。
-- 目的地の入力はない → 「行きたい方向」は**ユーザーの現在の進行方向**（平滑化したもの）とする（§9 Q4）。
+- ゴール（v1）: **端末が向いている方向の、地面上で見える最も遠い点**。
+  - カメラの前方を地面に投影した方向に沿って、地面マスクの最遠点を探す。
+  - 上限は30m。見つからないときは、その方向に30m先の点とする。
+  - 将来は地図での目的地指定に差し替える（`GoalProvider`プロトコル）。
 
 ### 4.2 アルゴリズム（Phase 1）
 
-1. **候補の生成**: 速度vで、T_plan（例: 6秒、または8m/vの短い方）までの候補経路を生成する。
-   - 曲率が一定の円弧、2段の円弧（一度曲がってから戻る）、最大旋回レートの制約付き。
+1. **候補の生成**: 速度vで、T_plan後までの候補経路を生成する。
+   - 前半と後半で曲率を変える2段の円弧（一度曲がってから戻る）。旋回レートの上限付き。
    - 数は数百本程度。DWA / state latticeの考え方（📚）。
 2. **衝突確率**: 各候補について、各他歩行者のサンプル軌道kとの距離が R（体の半径＋パーソナルスペース、例: 0.6m）を下回るかを時刻ごとに評価する。
    ```
    p_i = Σ_k w_k · σ((R − min_t |x(t) − s_ik(t)|) / ε)    （微分可能なソフト版）
    P_safe = Π_i (1 − p_i)                                  （他歩行者は互いに独立と仮定）
    ```
-3. **コスト**: J = w_risk·(1−P_safe) + w_goal·|行きたい方向からのずれ| + w_smooth·|前回の計画との差|
+3. **コスト**: J = w_risk·(1−P_safe) + w_goal·(終点からゴールへの距離の減少量に対するペナルティ) + w_smooth·|前回の計画との差|
    - 前回の計画との差の項はヒステリシスとして働き、矢印のチラつきを抑える。
 4. **減速が必要な場合**（最良の候補でも P_safe < 閾値）: 上位M本の経路の形を固定し、**ST-graph**（経路上の距離 s × 時刻 t）上で動的計画法を解いて、速度プロファイル v(s) ≤ v_current を求める（📚 Kant & Zucker 1986のパス-速度分解。自動運転のBaidu Apollo EM Plannerでも使われている方式）。
    - 色は v(s)/v_current で決める: 1.0 = 緑、〜0.6 = 黄、〜0.2以下 = 赤。
@@ -197,81 +219,83 @@ N_i = clamp(t_cpa + τ, N_min, N_max)      例: τ = 1.0s, N_min = 1.0s, N_max =
 ## 5. 描画・UI
 
 - **カメラ映像**: `MTKView`に描画する。デバッグ時はフラグメントシェーダでコントラストを下げ、白を混ぜて白っぽくする（1パスなのでほぼ無負荷）。
-- **地面のオーバーレイ**（経路、ヒートマップ、予測経路）: ワールド座標の点をカメラの内部パラメータと姿勢で画面に投影し、SwiftUIの`Canvas`で描く。重くなったらMetal化する。
-  - **RealityKitの`ARView`は使わない**。`ARSession`を前提にしているので、動画再生とMacで同じUIにできないため。
-- **HUD（上部に常時表示）**: ユーザー速度、FPS、検出数、追跡数、各段の処理時間、ARKitの追跡状態、深度の取得元（LiDARか地面平面か）。
-- **ドロワー**: 左下のハンバーガーメニューから下からせり上がるシート。中身は「デバッグモード（デフォルトON）」「ホライズン方式」「入力ソース（ライブ / 記録 / 動画）」「記録の開始・停止」など。
+- **地面のオーバーレイ**（経路、ヒートマップ、予測経路）: 地面座標の点を、推定した内部パラメータと地面平面を使って画面に投影し、SwiftUIの`Canvas`で描く。重くなったらMetal化する。
+  - **RealityKitの`ARView`は使わない**。`ARSession`が前提なので、動画とMacで同じUIにできないため。
+- **HUD（上部に常時表示）**: ユーザー速度、FPS、検出数、追跡数、各処理の時間、自己位置推定の状態、カメラ高さ、入力ソース。
+- **ドロワー**: 左下のハンバーガーメニューを押すと、下からせり上がるシート。中身は「デバッグモード（デフォルトON）」と「入力ソース（カメラ / 動画）」。
 
 ---
 
 ## 6. 動画入力・評価・Mac対応
 
-### 6.1 アーキテクチャ（入力層を抽象化する）
+### 6.1 アーキテクチャ
 
 ```
 FrameSource (protocol)
- ├─ ARKitFrameSource        … iOSのライブ入力（ARSession）           #if os(iOS)
- ├─ RecordedSessionSource   … アプリで記録したセッション（iOS / macOS）
- └─ PlainVideoSource        … 写真ライブラリなどの任意動画（iOS / macOS）
-        ↓  Frame { 画像, 時刻, カメラ内部パラメータ, 姿勢?, 深度?, 地面? }
-Perception（Vision / Core ML） → Tracker → Predictor → Planner → Renderer / HUD
-                      ↑ ここから下はiOSとmacOSで共通コード
+ ├─ CameraFrameSource   … iOSのライブ入力（AVCaptureSession＋CoreMotion）   #if os(iOS)
+ └─ VideoFileSource     … 写真ライブラリ / ファイルの普通の動画（AVAssetReader）  iOS / macOS
+        ↓  Frame { 画像, 時刻, 向き, 重力?（ライブのみ）, ジャイロ?（ライブのみ） }
+Perception: 深度(MoGe-2) / 人物検出(Vision) / オプティカルフロー
+        ↓
+Core: 地面推定 → 自己位置推定 → 人物の地面位置 → 追跡 → 予測 → 計画   ← 純Swift、swift testで検証
+        ↓
+Renderer（Metal＋SwiftUI Canvas）/ HUD / ドロワー                     ← iOSとmacOSで共通
 ```
 
-### 6.2 写真ライブラリの動画に同じUIを重ねられるか → **できる。ただし2段階に分ける**
+- ライブ映像はARKitではなく`AVCaptureSession`で取る。ARKitを使わないことで、ライブと動画の処理を同一にできる。
+- 重力とジャイロはライブでだけ得られる追加情報で、なくても動く設計にする。
 
-1. **記録セッション（推奨・高精度）**: アプリに記録モードを付ける。HEVCの映像に加えて、フレームごとの姿勢、内部パラメータ、LiDAR深度（間引き・圧縮）、時刻を保存し、ライブと**まったく同じ条件で**再生する。再現性があるので、アルゴリズムの比較やリグレッションテストに使える。
-2. **任意の動画（簡易・精度低め）**: ARKitのデータがないので、次の方法で推定する。
-   - 内部パラメータ: 動画のメタデータ（焦点距離）から求める。なければ画角を仮定する。
-   - 地面: カメラ高さ（例: 1.4m）と俯角を仮定するか、設定で調整する。
-   - ユーザーの移動: Visionのホモグラフィ推定やオプティカルフロー（`TrackOpticalFlowRequest`、✅ iOS 18+/macOS 15+）を、画像下部の地面領域に適用して推定する。
-   - 深度: 地面平面へのレイキャスト。必要に応じてDepth Anything V2 Smallで補う。
+### 6.2 写真ライブラリの動画に同じUIを重ねられるか → **できる**
 
-   精度は1.より明らかに落ちるので、HUDに「単眼モード」と表示する。
+- 深度・地面・自己位置をすべて画像から推定するので、普通の動画でもライブと同じ処理になる（記録モードは不要になった）。
+- 動画のメタデータに焦点距離があれば内部パラメータの初期値に使い、なければMoGe-2の画角推定を使う。
+- 再生は実時間（処理が追いつかなければフレームを捨てる）と、全フレーム処理（評価用）を選べる。
 
 ### 6.3 Macで動かせるか → **できる**
 
-- ✅ Vision（人物検出・オプティカルフロー）、Core ML、Metal、SwiftUI、CoreMotionはmacOSでも使える。
-- ✅ ARKitはiOS/iPadOSのみで、**Mac Catalystにも存在しない**ので、ネイティブのmacOSターゲットを用意し、ARKit部分は`#if os(iOS)`で分ける。
-- Macでは記録セッションと任意動画を再生でき、UIは同じ。ファイルのドラッグ＆ドロップとコマ送りも付けられる。
-- さらに`RouteDanceCore`パッケージに対して`swift test`でヘッドレス評価を回せる。
+- ✅ Vision（人物検出・オプティカルフロー）、Core ML、Metal、SwiftUI、AVFoundationはmacOSでも使える。
+- macOSアプリでは、動画ファイルを開くかドラッグ＆ドロップで読み込み、iPhoneと同じUIで再生する。
+- `RouteDanceCore`は`swift test`でヘッドレスに検証できる。
 
 ### 6.4 評価指標
 
 | 対象 | 指標 | 正解データ |
 | --- | --- | --- |
-| 予測 | ADE/FDE（ホライズン別）、minADE_K、NLL | 記録セッションでは**全区間を見た後処理の追跡結果**（前後方向の平滑化）を疑似正解にする。ETH/UCYでは公式の正解 |
+| 予測 | ADE/FDE（ホライズン別）、minADE_K | 動画全体を処理した後の、**前後方向に平滑化した追跡結果**を疑似正解にする。ETH/UCYでは公式の正解 |
 | 追跡 | IDスイッチ数、トラックの寿命 | 目視でのラベル付け（少量） |
-| 計画 | 他歩行者との最小距離、予測上の衝突率、推奨方向の揺れ（°/s）、減速率 | 記録セッション |
-| 性能 | 各段の処理時間、FPS、端末の温度状態 | 実機 |
+| 計画 | 他歩行者との最小距離、予測上の衝突率、推奨方向の揺れ（°/s）、減速率 | 動画 |
+| 性能 | 各処理の時間、FPS、端末の温度状態 | 実機 |
 
-- ETH/UCYを読み込むツールを用意し、予測器の実装が論文の値（例: CVMのADE）を再現するかをCIなしでもローカルで確認する。
-- JRDB（ego視点のロボットデータセット）は利用条件が ⚠️ 未確認。
+- ETH/UCYを読み込むツールを用意し、予測器の実装が論文の値（例: CVMのADE）を再現するかをローカルで確認する。
 
 ---
 
 ## 7. 開発環境・プロジェクト構成
 
-- Xcode 26.6 / Swift 6.3（strict concurrency）/ Swift Testing。
-- **Deployment target: iOS 18.0 / macOS 15.0**。新しいVision Swift API（`DetectHumanRectanglesRequest`、`TrackOpticalFlowRequest`）を使うため（§9 Q1）。
-- 実機: iPhone 15 Pro（LiDARあり）を想定。非LiDAR機では`personSegmentationWithDepth`と地面平面方式で動かす。
-- **XcodeGen**（`project.yml`）でプロジェクトを生成し、`.xcodeproj`はGit管理しない。プロジェクトファイルの衝突がなくなる（§9 Q3）。
-- 構成案:
+- Xcode / Swift 6（strict concurrency）/ Swift Testing。
+- **Deployment target: iOS 27.0 / macOS 27.0**（アプリ）。
+  - 2026-10-17時点の手元はXcode 26.6（iOS SDK 26.5）とmacOS 26.5。iOS 27のSDKとmacOS 27を入れるまでは、`project.yml`の`DEPLOYMENT_IOS` / `DEPLOYMENT_MACOS`を一時的に26.0にしてビルド確認する。
+  - `RouteDanceCore`パッケージは、ホスト上で`swift test`できるよう下限をiOS 26 / macOS 26にしておく（27の専用APIは使わない）。
+- 実機: iPhone 15 Pro。
+- **XcodeGen**（`project.yml`）でプロジェクトを生成し、`.xcodeproj`はGit管理しない。
 
 ```
 route-dance/
-├─ project.yml                 # XcodeGen
-├─ App/                        # SwiftUIアプリ（iOS + macOS）
-│  ├─ Shared/                  # UI（HUD, Drawer, Overlay, Compass）
-│  ├─ iOS/                     # ARKitFrameSource, Recorder
+├─ project.yml                     # XcodeGen
+├─ App/
+│  ├─ Shared/                      # UI（HUD, Drawer, Overlay, Compass）, Pipeline, VideoFileSource
+│  ├─ iOS/                         # CameraFrameSource, Info.plist
 │  └─ macOS/
-├─ Packages/RouteDanceCore/    # 純Swift: Geometry, Tracking, Prediction, Planning, Eval
+├─ Packages/RouteDanceCore/
+│  ├─ Sources/RouteDanceCore/      # 純Swift: Geometry, Ground, Odometry, Tracking, Prediction, Planning
+│  ├─ Sources/RouteDancePerception/# Vision / Core ML / Metalのラッパー
 │  └─ Tests/
-├─ Tools/                      # 評価CLI, モデル変換スクリプト(Python)
-└─ docs/                       # SPEC.md, TECH_SELECTION.md
+├─ Models/                         # .mlpackage（Git管理外）
+├─ Tools/ModelConversion/          # Core ML変換スクリプト(Python)
+└─ docs/
 ```
 
-- 外部依存は**なし**から始める（すべてApple純正のフレームワークと自前実装）。Core MLモデルは`.gitignore`に入れ、取得スクリプトかGit LFSで管理する。
+- 外部依存は**なし**（Apple純正のフレームワークと自前実装のみ）。Core MLモデルは変換スクリプトで生成し、`.gitignore`に入れる。
 
 ---
 
@@ -280,40 +304,50 @@ route-dance/
 | # | 内容 | 完了条件 |
 | --- | --- | --- |
 | M0 | Git、ドキュメント、XcodeGen、空のアプリ（iOS/macOS）、Coreパッケージ | iOSとmacOSでビルドが通る |
-| M1 | ARSession、カメラ描画（デバッグ時の白っぽい加工）、HUD（速度・状態）、ドロワー | 実機で速度が表示される |
-| M2 | 人物検出→3D位置→追跡、デバッグ表示（検出枠、ID、距離） | 歩行者に安定したIDが付く |
-| M3 | CVM予測、可変ホライズン、予測経路の表示 | 予測経路が表示される |
-| M4 | 経路計画、減速の色分け、コンパス矢印、衝突確率のヒートマップ | 推奨経路と矢印が表示される |
-| M5 | 記録と再生（iOS/macOS）、評価指標 | Macで記録を再生でき、指標が出る |
-| M6 | 任意動画の単眼モード | 写真ライブラリの動画で表示できる |
+| M1 | Coreアルゴリズム（地面、オドメトリ、追跡、CVM予測、CPAホライズン、計画）とユニットテスト | `swift test`が通る |
+| M2 | 深度モデルのCore ML化と後処理 | Macで推論が動く |
+| M3 | UIの骨組み（映像、デバッグ加工、HUD、ドロワー、コンパス、オーバーレイ） | Macで動画を再生してUIが出る |
+| M4 | パイプラインの接続（検出→位置→追跡→予測→計画→描画） | Macで動画から推奨経路が出る |
+| M5 | iOSのライブカメラ、写真ライブラリからの動画選択 | 実機で動く（iOS 27 SDKの導入後） |
+| M6 | 評価（疑似正解、指標） | 評価表 |
 | M7 | 学習型予測器のCore ML化と比較 | 評価表 |
 
 ---
 
-## 9. レビューで決めてほしいこと
+## 9. 未決事項
 
-1. **Deployment target**: iOS 18 / macOS 15で良いか（iOS 26に上げれば最新APIを自由に使えるが、対象端末が減る）。
-2. **軌道予測の進め方**: 「Phase 1は物理ベース(CVM)、Phase 2で学習モデル」で良いか。最初から学習モデルを入れたい場合は、M3の期間が延びる。
-3. **XcodeGenの導入**（`brew install xcodegen`）で良いか。
-4. **「行きたい方向」の定義**: 目的地の入力がないので、現在の進行方向とする案で良いか（代案: カメラの向き、画面タップで方向を指定）。
-5. **予測ホライズンN**: CPAベースをデフォルトにし、d/v方式は切替で残す、で良いか。
-6. **任意動画の扱い**: 本命は記録セッション、任意動画は精度の落ちる単眼モード、という2段構えで良いか。
+- 地図による目的地指定（将来）: 地図SDK、経路探索、地図と映像の位置合わせ（GPSとコンパスの精度）。
+- 計画のパラメータ（R、T_plan、候補数、色の閾値）は動画で調整する。
 
 ## 10. リスク
 
 - **歩きスマホの安全性**: 画面を見ながら歩く使い方そのものにリスクがある。注意表示などの扱いは別途検討する。
+- **単眼深度のスケール誤差**: 数%〜十数%ずれる。地面から得たカメラ高さで補正するが、坂・階段・地面が見えない混雑では劣化する。
+- **画像オドメトリのドリフト**: 床の模様が少ない、人が多い、急な回転、などで劣化する。経路は5秒先までの局所的なものなので、長期のドリフトは問題になりにくい。
+- **ANEの負荷と熱**: 深度（5Hz）と検出（10〜15Hz）を常時動かす。解像度と頻度は実機で調整する。
 - Visionの人物検出の遠距離での性能 ⚠️ → 足りなければYOLOX等に差し替える。
-- LiDARの有効距離（〜5m）を超える人物は地面平面方式に頼るので、坂や段差で誤差が出る。
 - ego視点の観測ノイズ（オクルージョン、画角外へのフレームアウト）が予測精度を大きく下げる。追跡の安定化が最重要。
-- 熱と電池: ARKit＋検出＋深度の常時実行。検出は10〜15Hzに間引き、描画は60fpsで補間する。
 - 学習モデルの重みとデータセットのライセンス（商用で使えるかどうか）。
 
-## 11. 出典
+## 11. 決定事項（2026-10-17のレビュー）
+
+1. ブランチは`master`。
+2. 対応OSは**iOS 27 / macOS 27**。
+3. 軌道予測は、Phase 1を物理ベース(CVM)とし、Phase 2で学習モデルを比較する。
+4. XcodeGenを使う。
+5. ゴールは**端末が向いている方向の最も奥**。将来は地図で指定した目的地へ、道のりに沿って案内する。
+6. 予測ホライズンは**CPA方式のみ**。
+7. 記録モードは**作らない**。普通の動画で動かす。
+8. 推奨経路は、歩行速度に合わせて**約5秒先まで**表示する。
+9. LiDARは精度が足りないので、**画像からの距離推定**を主軸にする。
+
+## 12. 出典
 
 一次情報（今回確認したもの）:
 
 - 軌道予測: [MoFlow](https://moflow-imle.github.io/) / [arXiv 2503.09950](https://arxiv.org/abs/2503.09950)、[EqMotion](https://github.com/MediaBrain-SJTU/EqMotion)、[LED](https://github.com/MediaBrain-SJTU/LED) / [arXiv 2303.10895](https://arxiv.org/abs/2303.10895)、[SingularTrajectory](https://github.com/InhwanBae/SingularTrajectory)、[EigenTrajectory](https://github.com/InhwanBae/EigenTrajectory)、[Trajectron++](https://github.com/StanfordASL/Trajectron-plus-plus)、[AgentFormer](https://github.com/Khrylx/AgentFormer)、[T2FPV](https://github.com/cmubig/T2FPV) / [arXiv 2209.11294](https://arxiv.org/abs/2209.11294)
 - 可変ホライズン・計画: [arXiv 2603.00507](https://arxiv.org/abs/2603.00507)、[arXiv 2607.09192](https://arxiv.org/abs/2607.09192)、[arXiv 2608.08323 (PGIF)](https://arxiv.org/abs/2608.08323)
+- 深度（追加調査）: [MoGe](https://github.com/microsoft/MoGe)（MIT）/ [moge-2-vits-normal](https://huggingface.co/Ruicheng/moge-2-vits-normal)、[Depth-Anything-3](https://github.com/ByteDance-Seed/Depth-Anything-3)（Small/BaseはApache-2.0、Nested GiantはCC-BY-NC）、[Metric3D](https://github.com/YvanYin/Metric3D)（BSD-2）、[Prompt Depth Anything](https://github.com/DepthAnything/PromptDA)、[Distill-Any-Depth](https://github.com/Westlake-AGI-Lab/Distill-Any-Depth)（MIT）
 - 深度: [apple/coreml-depth-anything-v2-small](https://huggingface.co/apple/coreml-depth-anything-v2-small)、[Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2)、[Video-Depth-Anything](https://github.com/DepthAnything/Video-Depth-Anything)、[apple/DepthPro](https://huggingface.co/apple/DepthPro)
 - 検出・追跡: [Ultralytics License](https://www.ultralytics.com/license)、[YOLOX](https://github.com/Megvii-BaseDetection/YOLOX)、[MultimediaTechLab/YOLO](https://github.com/MultimediaTechLab/YOLO)、[RF-DETR](https://github.com/roboflow/rf-detr)、[ByteTrack](https://github.com/FoundationVision/ByteTrack)、[OC-SORT](https://github.com/noahcao/OC_SORT)、[BoT-SORT](https://github.com/NirAharon/BoT-SORT)
 - Apple: [ARSession](https://developer.apple.com/documentation/arkit/arsession)、[ARFrame.sceneDepth](https://developer.apple.com/documentation/arkit/arframe/scenedepth)、[ARBodyTrackingConfiguration](https://developer.apple.com/documentation/arkit/arbodytrackingconfiguration)、[DetectHumanRectanglesRequest](https://developer.apple.com/documentation/vision/detecthumanrectanglesrequest)、[TrackOpticalFlowRequest](https://developer.apple.com/documentation/vision/trackopticalflowrequest)、[CMPedometer](https://developer.apple.com/documentation/coremotion/cmpedometer)
