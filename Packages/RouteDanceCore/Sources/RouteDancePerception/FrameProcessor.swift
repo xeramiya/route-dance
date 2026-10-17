@@ -159,7 +159,11 @@ public actor FrameProcessor {
                     return (nil, nil, "深度モデルを読み込めません: \(error)")
                 }
             }
-            return (estimator, try? estimator.estimate(image, timestamp: timestamp, knownHorizontalFOV: fov), nil)
+            do {
+                return (estimator, try estimator.estimate(image, timestamp: timestamp, knownHorizontalFOV: fov), nil)
+            } catch {
+                return (estimator, nil, "深度推定に失敗: \(error)")
+            }
         }
         depthTask = Task { await task.value.1 }
         Task {
@@ -173,7 +177,9 @@ public actor FrameProcessor {
         if let estimator { depthEstimators[portrait] = estimator }
         if let error {
             depthError = error
-            lastDepthStart = .infinity  // 読み込めないモデルは再試行しない
+            if estimator == nil { lastDepthStart = .infinity }  // 読み込めないモデルは再試行しない
+        } else {
+            depthError = nil
         }
         if let out { pendingDepth = (out, width, height) }
     }

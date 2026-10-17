@@ -5,10 +5,10 @@ import simd
 public struct GroundKalman: Sendable {
     public var x: SIMD4<Double>
     public var P: simd_double4x4
-    /// 加速度のスペクトル密度（m²/s³）。歩行者の向きや速さの変化の大きさ。
+    /// 加速度の連続白色雑音のスペクトル密度 q_c（m²/s³）。歩行者の向きや速さの変化の大きさ。
     public var accelNoise: Double
 
-    public init(position: Vec2, variance: Double, accelNoise: Double = 0.8) {
+    public init(position: Vec2, variance: Double, accelNoise: Double = 0.35) {
         x = SIMD4(position.x, position.y, 0, 0)
         P = simd_double4x4(diagonal: SIMD4(variance, variance, 1.0, 1.0))
         self.accelNoise = accelNoise
@@ -26,13 +26,15 @@ public struct GroundKalman: Sendable {
         F[2][0] = dt  // 列優先: F[col][row]
         F[3][1] = dt
         x = F * x
+        // 連続白色雑音加速度モデル（離散化）: Q = q_c [[dt³/3, dt²/2], [dt²/2, dt]]。
+        // フレームレートに依存せず、見失い時間 T で位置の分散がおよそ q_c·T³/3 増える。
         let q = accelNoise
-        let dt2 = dt * dt, dt3 = dt2 * dt / 2, dt4 = dt2 * dt2 / 4
+        let q11 = q * dt * dt * dt / 3, q12 = q * dt * dt / 2, q22 = q * dt
         var Q = simd_double4x4()
-        Q[0][0] = dt4 * q; Q[1][1] = dt4 * q
-        Q[2][0] = dt3 * q; Q[0][2] = dt3 * q
-        Q[3][1] = dt3 * q; Q[1][3] = dt3 * q
-        Q[2][2] = dt2 * q; Q[3][3] = dt2 * q
+        Q[0][0] = q11; Q[1][1] = q11
+        Q[2][0] = q12; Q[0][2] = q12
+        Q[3][1] = q12; Q[1][3] = q12
+        Q[2][2] = q22; Q[3][3] = q22
         P = F * P * F.transpose + Q
     }
 
@@ -96,9 +98,19 @@ public struct Track: Sendable, Identifiable {
     public var timeSinceUpdate: Double
     /// 直近の推定位置（フィルタ後）の履歴（現フレームの座標系、デバッグ表示用）。
     public var history: [TimedPoint]
+    /// 見失い中に、外挿した位置から推定した画像上の枠（描画用）。検出されているフレームでは nil。
+    public var predictedBox: PersonDetection?
+    /// 最後に観測された位置と時刻（再接続時の速度の再推定に使う）。
+    var lastObservation: TimedPoint?
 
     public var position: Vec2 { filter.position }
     public var velocity: Vec2 { filter.velocity }
+    /// 位置の標準偏差（共分散の大きい方の軸）。
+    public var positionSigma: Double {
+        let c = filter.positionCovariance
+        let tr = c[0][0] + c[1][1], det = c.determinant
+        return sqrt(max(0, tr / 2 + sqrt(max(0, tr * tr / 4 - det))))
+    }
 }
 
 /// ByteTrack方式の多人数追跡（地面座標）。
@@ -109,9 +121,16 @@ public struct PedestrianTracker: Sendable {
         /// 割り当てを許すマハラノビス距離の2乗（χ²の自由度2で99%は9.21）。
         public var gate = 9.21
         public var iouWeight = 2.0
-        public var confirmHits = 3
-        public var maxLostTime = 1.0
-        public var maxTentativeTime = 0.4
+        public var confirmHits = 2
+        /// これより近い検出は1回で確定する（近くの人は確定を待たずに避ける）。
+        public var immediateConfirmDistance = 4.0
+        /// 見失ってから削除するまでの時間。近い人ほど長く保持する（横を通過中の人は画面外に出た直後が一番危ない）。
+        public var maxLostTimeNear = 2.0
+        public var maxLostTimeFar = 1.0
+        public var nearDistance = 4.0
+        /// 見失い中に位置の不確かさがこれを超えたら削除する（m）。
+        public var maxLostSigma = 1.5
+        public var maxTentativeTime = 0.6
         /// 速度の上限（m/s）。走っている人を含めた目安。
         public var maxSpeed = 3.5
         public var historyLength = 3.0
@@ -144,6 +163,7 @@ public struct PedestrianTracker: Sendable {
         for i in tracks.indices {
             tracks[i].filter.transform(egoDelta)
             tracks[i].history = tracks[i].history.map { TimedPoint(t: $0.t, p: egoDelta.apply($0.p)) }
+            tracks[i].lastObservation = tracks[i].lastObservation.map { TimedPoint(t: $0.t, p: egoDelta.apply($0.p)) }
             tracks[i].filter.predict(dt: dt)
             tracks[i].age += dt
             tracks[i].timeSinceUpdate += dt
@@ -182,17 +202,21 @@ public struct PedestrianTracker: Sendable {
             var f = GroundKalman(position: p.position, variance: max(p.rangeVariance, p.lateralVariance))
             f.P[2][2] = 1.0
             f.P[3][3] = 1.0
+            let near = p.position.length < config.immediateConfirmDistance
             tracks.append(Track(
-                id: nextID, filter: f, state: .tentative, lastDetection: p.detection,
-                hits: 1, age: 0, timeSinceUpdate: 0, history: [TimedPoint(t: t, p: p.position)]
+                id: nextID, filter: f, state: near ? .confirmed : .tentative, lastDetection: p.detection,
+                hits: 1, age: 0, timeSinceUpdate: 0, history: [TimedPoint(t: t, p: p.position)],
+                predictedBox: nil, lastObservation: TimedPoint(t: t, p: p.position)
             ))
             nextID += 1
         }
 
         // 削除と速度の上限。
         tracks.removeAll { tr in
-            (tr.state == .tentative && tr.timeSinceUpdate > config.maxTentativeTime)
-                || tr.timeSinceUpdate > config.maxLostTime
+            if tr.state == .tentative { return tr.timeSinceUpdate > config.maxTentativeTime }
+            let limit = tr.position.length < config.nearDistance ? config.maxLostTimeNear : config.maxLostTimeFar
+            return tr.timeSinceUpdate > limit || (tr.timeSinceUpdate > 0 && tr.positionSigma > config.maxLostSigma)
+                || tr.position.y < -1.5  // 完全に後ろへ抜けた人
         }
         for i in tracks.indices {
             let v = tracks[i].filter.velocity
@@ -205,14 +229,51 @@ public struct PedestrianTracker: Sendable {
         return tracks
     }
 
-    /// 予測や計画に使うトラック（確定済みで、見失って間もないもの）。
+    /// 予測や計画に使うトラック。確定済みのものは、見失っていても削除されるまで（外挿した位置で）使う。
+    /// 見失っている間の不確かさは、カルマンフィルタの共分散の増加で表す。
     public var activeTracks: [Track] {
-        tracks.filter { $0.state == .confirmed || ($0.state == .lost && $0.timeSinceUpdate < 0.5) }
+        tracks.filter { $0.state != .tentative }
+    }
+
+    /// 見失い中のトラックについて、外挿した地面位置から画像上の枠を推定する（描画用）。
+    public mutating func updatePredictedBoxes(geometry g: CameraGeometry, personHeight: Double = 1.65) {
+        for i in tracks.indices {
+            guard tracks[i].timeSinceUpdate > 0, tracks[i].state != .tentative else {
+                tracks[i].predictedBox = nil
+                continue
+            }
+            let p = tracks[i].position
+            let side = Vec2(p.normalized.y, -p.normalized.x) * 0.25
+            let pts = [g.project(ground: p + side), g.project(ground: p - side),
+                       g.project(ground: p + side, height: personHeight), g.project(ground: p - side, height: personHeight)]
+            let ok = pts.compactMap { $0 }
+            guard ok.count == 4 else {
+                tracks[i].predictedBox = nil
+                continue
+            }
+            tracks[i].predictedBox = PersonDetection(
+                minX: ok.map(\.x).min()!, minY: ok.map(\.y).min()!, maxX: ok.map(\.x).max()!, maxY: ok.map(\.y).max()!,
+                confidence: 0
+            )
+        }
     }
 
     private mutating func apply(person p: LocalizedPerson, to ti: Int, at t: Double) {
         let R = observationCovariance(p)
+        // 見失いから戻ったときは、最後の観測と今の観測から速度を再推定する（OC-SORT の Observation-centric Re-Update の考え方）。
+        // 見失い中は外挿だけで進んだため、速度がずれていることが多い。
+        if tracks[ti].timeSinceUpdate > 0.25, let last = tracks[ti].lastObservation, t - last.t > 0.2 {
+            let v = (p.position - last.p) / (t - last.t)
+            if v.length < config.maxSpeed {
+                tracks[ti].filter.x[2] = v.x
+                tracks[ti].filter.x[3] = v.y
+                tracks[ti].filter.P[2][2] = min(tracks[ti].filter.P[2][2], 0.25)
+                tracks[ti].filter.P[3][3] = min(tracks[ti].filter.P[3][3], 0.25)
+            }
+        }
         tracks[ti].filter.update(position: p.position, covariance: R)
+        tracks[ti].lastObservation = TimedPoint(t: t, p: p.position)
+        tracks[ti].predictedBox = nil
         tracks[ti].lastDetection = p.detection
         tracks[ti].hits += 1
         tracks[ti].timeSinceUpdate = 0

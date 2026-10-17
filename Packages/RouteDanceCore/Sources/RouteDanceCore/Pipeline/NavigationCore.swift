@@ -45,7 +45,11 @@ public struct NavigationSnapshot: Sendable {
     public var groundInlierRatio: Double?
     public var odometryInliers: Int
     public var persons: [LocalizedPerson]
+    /// このフレームの検出（位置推定できなかったものも含む、描画用）。
+    public var detections: [PersonDetection]
     public var tracks: [Track]
+    /// 深度から作った静的障害物。
+    public var obstacles: ObstacleMap
     public var forecasts: [PedestrianForecast]
     public var plan: PlannerOutput?
     public var riskField: RiskField?
@@ -76,6 +80,9 @@ public struct NavigationCore: Sendable {
     private var latestDepth: DepthMap?
     private var previousGeometry: CameraGeometry?
     private var lastPersons: [LocalizedPerson] = []
+    private var lastDetections: [PersonDetection] = []
+    public var obstacleBuilder = ObstacleMapBuilder()
+    private var obstacles = ObstacleMap.empty
 
     public init(config: Config = Config()) {
         self.config = config
@@ -91,6 +98,9 @@ public struct NavigationCore: Sendable {
         latestDepth = nil
         previousGeometry = nil
         lastPersons = []
+        lastDetections = []
+        obstacles = .empty
+        obstacleBuilder.reset()
     }
 
     public mutating func process(_ input: PerceptionInput) -> NavigationSnapshot {
@@ -121,6 +131,16 @@ public struct NavigationCore: Sendable {
             }
             measure("ground") {
                 _ = ground.update(points: d.groundCandidatePoints(excluding: exclude), at: t)
+            }
+        }
+        let camForObstacles = camera ?? PinholeCamera(
+            horizontalFOV: input.knownHorizontalFOV ?? 65 * .pi / 180, width: input.imageWidth, height: input.imageHeight
+        )
+        if let d = input.depth {
+            let g = CameraGeometry(camera: camForObstacles, ground: ground.current)
+            let boxes: [PersonDetection] = input.detections ?? lastDetections
+            obstacles = measure("obstacles") {
+                obstacleBuilder.update(depth: d, geometry: g, excluding: boxes, imageWidth: input.imageWidth, imageHeight: input.imageHeight, at: t)
             }
         }
         let cam = camera ?? PinholeCamera(
@@ -161,8 +181,11 @@ public struct NavigationCore: Sendable {
             }
             lastPersons = persons
         }
+        if let dets = input.detections { lastDetections = dets }
+        obstacles = obstacleBuilder.transform(obstacles, by: egoDelta)
         measure("track") {
             _ = tracker.update(persons: input.detections == nil ? [] : persons, egoDelta: egoDelta, at: t)
+            tracker.updatePredictedBoxes(geometry: geometry)
         }
         let active = tracker.activeTracks
 
@@ -177,7 +200,7 @@ public struct NavigationCore: Sendable {
             depthForGoal?.farthestVisibleGround(heading: heading, geometry: geometryForGoal)
         })
         let plan = measure("plan") {
-            planner.plan(forecasts: forecasts, userVelocity: egoState.velocity, goal: goal)
+            planner.plan(forecasts: forecasts, userVelocity: egoState.velocity, goal: goal, obstacles: obstacles)
         }
         var field: RiskField?
         if config.computeRiskField {
@@ -193,7 +216,7 @@ public struct NavigationCore: Sendable {
             timestamp: t, geometry: geometry, userVelocity: egoState.velocity, userSpeed: egoState.speed,
             egoTracking: egoState.isTracking, groundConverged: ground.isConverged,
             groundInlierRatio: ground.lastObservation?.inlierRatio, odometryInliers: odoInliers,
-            persons: persons, tracks: tracker.tracks, forecasts: forecasts, plan: plan, riskField: field,
+            persons: persons, detections: lastDetections, tracks: tracker.tracks, obstacles: obstacles, forecasts: forecasts, plan: plan, riskField: field,
             goal: goal, timings: timings, predictorName: predictor.name
         )
     }

@@ -81,7 +81,7 @@ public struct PathPlanner: Sendable {
     /// - Parameters:
     ///   - userVelocity: ユーザーの速度（地面座標）。
     ///   - goal: 目標地点（地面座標）。
-    public mutating func plan(forecasts: [PedestrianForecast], userVelocity: Vec2, goal: Vec2) -> PlannerOutput {
+    public mutating func plan(forecasts: [PedestrianForecast], userVelocity: Vec2, goal: Vec2, obstacles: ObstacleMap = .empty) -> PlannerOutput {
         let speed = min(max(userVelocity.length, config.minPlanningSpeed), config.maxPlanningSpeed)
         // 進行方向: 歩いていれば速度の向き、止まっていれば前方（端末の向き）。
         // 歩行者は端末を進行方向へ向けて持つので、推定速度の向きが前方から大きく外れる場合は誤推定とみなして制限する。
