@@ -94,7 +94,7 @@ public struct Track: Sendable, Identifiable {
     public var hits: Int
     public var age: Double
     public var timeSinceUpdate: Double
-    /// 直近の観測位置の履歴（現フレームの座標系、デバッグ表示用）。
+    /// 直近の推定位置（フィルタ後）の履歴（現フレームの座標系、デバッグ表示用）。
     public var history: [TimedPoint]
 
     public var position: Vec2 { filter.position }
@@ -221,7 +221,7 @@ public struct PedestrianTracker: Sendable {
         } else if tracks[ti].state == .lost {
             tracks[ti].state = .confirmed
         }
-        tracks[ti].history.append(TimedPoint(t: t, p: p.position))
+        tracks[ti].history.append(TimedPoint(t: t, p: tracks[ti].filter.position))
         tracks[ti].history.removeAll { t - $0.t > config.historyLength }
     }
 

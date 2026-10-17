@@ -42,7 +42,7 @@ public final class DepthEstimator: @unchecked Sendable {
     public static func bundled(portrait: Bool, in bundle: Bundle = .main) throws -> DepthEstimator {
         let name = portrait ? "MoGe2S" : "MoGe2S_landscape"
         for ext in ["mlmodelc", "mlpackage"] {
-            if let url = bundle.url(forResource: name, withExtension: ext) ?? bundle.url(forResource: "Models/\(name)", withExtension: ext) {
+            if let url = bundle.url(forResource: name, withExtension: ext) ?? bundle.url(forResource: name, withExtension: ext, subdirectory: "Models") {
                 return try DepthEstimator(url: url)
             }
         }

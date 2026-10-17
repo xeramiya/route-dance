@@ -1,8 +1,5 @@
-# XcodeGen の設定。`xcodegen generate` で RouteDance.xcodeproj を作る（.xcodeproj はGit管理しない）。
-#
-# 対応OSは iOS 27 / macOS 27。
-# iOS 27 SDK と macOS 27 を入れるまでは、次のように一時的に 26.0 でビルドする:
-#   DEPLOYMENT_IOS=26.0 DEPLOYMENT_MACOS=26.0 xcodegen generate
+# XcodeGen の設定。`scripts/generate.sh` で RouteDance.xcodeproj を作る（.xcodeproj はGit管理しない）。
+# 対応OS（既定 iOS 27 / macOS 27）と署名チームは、scripts/generate.sh が環境変数で渡す。
 name: RouteDance
 
 options:
@@ -34,13 +31,11 @@ targets:
     sources:
       - path: App/Shared
       - path: App/iOS
-      - path: Models
+      # 深度モデル（Tools/ModelConversion で生成。Git管理外）。Xcodeがビルド時に .mlmodelc にコンパイルする。
+      - path: Models/MoGe2S.mlpackage
         optional: true
-        buildPhase: resources
-        type: folder
-        excludes:
-          - "*_16x9.mlpackage"
-          - "*_landscape.mlpackage"
+      - path: Models/MoGe2S_landscape.mlpackage
+        optional: true
     dependencies:
       - package: RouteDanceCore
         product: RouteDanceCore
@@ -69,13 +64,11 @@ targets:
     sources:
       - path: App/Shared
       - path: App/macOS
-      - path: Models
+      # 深度モデル（Tools/ModelConversion で生成。Git管理外）。Xcodeがビルド時に .mlmodelc にコンパイルする。
+      - path: Models/MoGe2S.mlpackage
         optional: true
-        buildPhase: resources
-        type: folder
-        excludes:
-          - "*_16x9.mlpackage"
-          - "*_landscape.mlpackage"
+      - path: Models/MoGe2S_landscape.mlpackage
+        optional: true
     dependencies:
       - package: RouteDanceCore
         product: RouteDanceCore
@@ -86,16 +79,16 @@ targets:
       properties:
         CFBundleDisplayName: RouteDance
         LSApplicationCategoryType: public.app-category.developer-tools
-    entitlements:
-      path: App/macOS/RouteDance.entitlements
-      properties:
-        com.apple.security.app-sandbox: true
-        com.apple.security.files.user-selected.read-only: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.xeramiya.routedance.mac
         PRODUCT_NAME: RouteDance
         ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: App/macOS/RouteDance.entitlements
+      configs:
+        # Debugはサンドボックスなし（任意のパスの動画を開く・結果を書き出す開発用）。
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: App/macOS/RouteDanceDebug.entitlements
 
 schemes:
   RouteDance-iOS:

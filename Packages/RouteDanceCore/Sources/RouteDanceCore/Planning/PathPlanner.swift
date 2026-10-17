@@ -51,13 +51,17 @@ public struct PathPlanner: Sendable {
         public var wSmooth = 0.4
         public var wCurvature = 0.3
         /// 減速を検討する上位の経路の数。
-        public var slowdownCandidates = 6
+        public var slowdownCandidates = 3
+        /// 速度プロファイルのDPで残すノード数（計算量の上限）。
+        public var slowdownBeam = 120
         /// 速度プロファイルの離散化（速度比の段階）。
         public var speedLevels: [Double] = [1.0, 0.85, 0.7, 0.55, 0.4, 0.25, 0.1, 0.0]
         /// 1ステップあたりに変えられる速度比の上限（加減速の滑らかさ）。
         public var maxSpeedLevelJump = 2
         /// コンパスの先読み時間（秒）。
         public var lookaheadTime = 1.5
+        /// 経路の初期方位を、端末の前方からこの角度以内に制限する（ラジアン）。
+        public var maxHeadingFromDevice = 60 * Double.pi / 180
         public init() {}
     }
 
@@ -80,7 +84,13 @@ public struct PathPlanner: Sendable {
     public mutating func plan(forecasts: [PedestrianForecast], userVelocity: Vec2, goal: Vec2) -> PlannerOutput {
         let speed = min(max(userVelocity.length, config.minPlanningSpeed), config.maxPlanningSpeed)
         // 進行方向: 歩いていれば速度の向き、止まっていれば前方（端末の向き）。
-        let heading0 = userVelocity.length > 0.3 ? userVelocity.heading : 0
+        // 歩行者は端末を進行方向へ向けて持つので、推定速度の向きが前方から大きく外れる場合は誤推定とみなして制限する。
+        let heading0: Double
+        if userVelocity.length > 0.3, userVelocity.y > 0 {
+            heading0 = min(max(userVelocity.heading, -config.maxHeadingFromDevice), config.maxHeadingFromDevice)
+        } else {
+            heading0 = 0
+        }
         let grid = ForecastGrid(forecasts: forecasts, dt: config.dt, duration: config.horizon)
         let steps = grid.steps
 
@@ -232,8 +242,8 @@ public struct PathPlanner: Sendable {
                 }
             }
             // ビームで枝刈り。
-            if next.count > 400 {
-                let kept = next.sorted { $0.value.cost < $1.value.cost }.prefix(400)
+            if next.count > config.slowdownBeam {
+                let kept = next.sorted { $0.value.cost < $1.value.cost }.prefix(config.slowdownBeam)
                 next = Dictionary(uniqueKeysWithValues: kept.map { ($0.key, $0.value) })
             }
             layers.append(next)

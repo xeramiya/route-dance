@@ -144,32 +144,37 @@ public actor FrameProcessor {
 
     private func startDepth(image: CIImage, timestamp: Double, fov: Double?, width: Int, height: Int) {
         let portrait = height >= width
-        let estimator: DepthEstimator
-        if let e = depthEstimators[portrait] {
-            estimator = e
-        } else {
-            do {
-                estimator = try loadDepth(portrait)
-                depthEstimators[portrait] = estimator
-            } catch {
-                depthError = "深度モデルを読み込めません: \(error)"
-                lastDepthStart = .infinity
-                return
-            }
-        }
+        let cached = depthEstimators[portrait]
+        let load = loadDepth
         lastDepthStart = timestamp
-        let task = Task.detached(priority: .userInitiated) { () -> DepthEstimator.Output? in
-            try? estimator.estimate(image, timestamp: timestamp, knownHorizontalFOV: fov)
+        // モデルの読み込み（初回は数秒）と推論は actor の外で行い、フレーム処理を止めない。
+        let task = Task.detached(priority: .userInitiated) { () -> (DepthEstimator?, DepthEstimator.Output?, String?) in
+            let estimator: DepthEstimator
+            if let cached {
+                estimator = cached
+            } else {
+                do {
+                    estimator = try load(portrait)
+                } catch {
+                    return (nil, nil, "深度モデルを読み込めません: \(error)")
+                }
+            }
+            return (estimator, try? estimator.estimate(image, timestamp: timestamp, knownHorizontalFOV: fov), nil)
         }
-        depthTask = task
+        depthTask = Task { await task.value.1 }
         Task {
-            let out = await task.value
-            self.finishDepth(out, width: width, height: height)
+            let (estimator, out, error) = await task.value
+            self.finishDepth(out, estimator: estimator, portrait: portrait, error: error, width: width, height: height)
         }
     }
 
-    private func finishDepth(_ out: DepthEstimator.Output?, width: Int, height: Int) {
+    private func finishDepth(_ out: DepthEstimator.Output?, estimator: DepthEstimator?, portrait: Bool, error: String?, width: Int, height: Int) {
         depthTask = nil
+        if let estimator { depthEstimators[portrait] = estimator }
+        if let error {
+            depthError = error
+            lastDepthStart = .infinity  // 読み込めないモデルは再試行しない
+        }
         if let out { pendingDepth = (out, width, height) }
     }
 
