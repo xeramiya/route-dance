@@ -49,18 +49,21 @@ public struct PlannerOutput: Sendable {
 /// - 候補は現在の曲率から連続に始め（クロソイド的な遷移）、表示する曲率は採用した曲率へ時間方向にローパスで追従する。
 public struct PathPlanner: Sendable {
     public struct Config: Sendable {
-        /// 経路を表示・評価する時間（秒）。経路長は v · horizon。
-        public var horizon = 7.0
+        /// 経路を表示・評価する時間（秒）。経路長は v · horizon（1.3 m/s で約13m）。
+        /// 他歩行者の予測は数秒先で不確かになるので、hardHorizon より先のリスクは softDecay で割り引く。
+        public var horizon = 10.0
         public var dt = 0.2
         /// 厳密な制約を課す時間（秒）と、それ以降のリスクの重みが 1/e になるまでの時間（秒）。
         public var hardHorizon = 3.0
         public var softDecay = 2.0
-        /// 停止中も経路が見えるよう、計画に使う速度の下限（m/s）。7秒で約5.6m。
+        /// 停止中も経路が見えるよう、計画に使う速度の下限（m/s）。10秒で約8m。
         public var minPlanningSpeed = 0.8
         public var maxPlanningSpeed = 2.5
         /// 曲率の候補（1/m）。k_max(v) = lateralAcceleration / v² を超えるものは使わない。
         public var curvatures: [Double] = [-0.5, -0.35, -0.25, -0.18, -0.12, -0.07, -0.03, 0, 0.03, 0.07, 0.12, 0.18, 0.25, 0.35, 0.5]
-        public var switchFractions: [Double] = [0.35, 0.6, 1.0]
+        /// 前半の曲率で進む時間（秒）。経路の長さ（horizon）に依らず、避ける動作の長さを一定にする。
+        /// nil（≥ horizon）は全区間同じ曲率。
+        public var switchTimes: [Double?] = [1.75, 3.0, nil]
         /// 歩行者の横加速度の目安（m/s²）。
         public var lateralAcceleration = 1.0
         /// 曲率の変化率の上限 |dk/ds|（1/m²）。クロソイド的な遷移。
@@ -105,6 +108,8 @@ public struct PathPlanner: Sendable {
         /// ヒステリシス: J(新)+δ < J(前回) のときだけ切り替える。δ = max(hysteresisAbsolute, hysteresisRelative·J(前回))。
         public var hysteresisAbsolute = 0.3
         public var hysteresisRelative = 0.15
+        /// 前回の形も最良の候補も安全なときの δ（滑らかさとゴールの差だけで比べる）。
+        public var hysteresisSafe = 0.02
         /// 切り替えてから最低限保持する時間（秒）。
         public var minHoldTime = 0.7
         /// 前回の形のリスクが ε のこの倍率を超えたら、保持時間を無視して切り替える。
@@ -222,7 +227,8 @@ public struct PathPlanner: Sendable {
         var scored: [Scored] = []
         scored.reserveCapacity(kList.count * (1 + 2 * k2List.count))
         for k1 in kList {
-            for sf in config.switchFractions {
+            for st in config.switchTimes {
+                let sf = st.map { min($0 / config.horizon, 1) } ?? 1
                 for k2 in (sf >= 1 ? [k1] : k2List) {
                     let shape = PathShape(k1: k1, k2: k2, switchFraction: sf)
                     let (pts, curv) = Self.rolloutWithCurvature(
@@ -271,7 +277,12 @@ public struct PathPlanner: Sendable {
         var forced = false
         if let prev = previousShape, let prevIndex = scored.firstIndex(where: { $0.shape == prev }), prevIndex != bestIndex {
             let cur = scored[prevIndex], best = scored[bestIndex]
-            let delta = max(config.hysteresisAbsolute, config.hysteresisRelative * cur.cost)
+            // 両方とも安全（ε 以下）なら、差は滑らかさとゴールだけ。大きなヒステリシスを掛けると、
+            // 避け終わった後も少し曲がった形を保ち続けて、だんだん向きがずれていくので、小さな δ で比べる。
+            let bothSafe = cur.rHard <= config.epsilon && best.rHard <= config.epsilon
+            let delta = bothSafe
+                ? config.hysteresisSafe
+                : max(config.hysteresisAbsolute, config.hysteresisRelative * cur.cost)
             forced = cur.rHard > config.forceSwitchFactor * config.epsilon && best.cost < cur.cost - 0.05
             let held = now - lastSwitchTime < config.minHoldTime
             let better = best.cost + delta < cur.cost
@@ -394,15 +405,16 @@ public struct PathPlanner: Sendable {
     /// 経路のリスクとコスト。人（異方ガウス）と静的障害物を独立に合成する。
     private func evaluateRisk(_ pts: [Vec2], grid: ForecastGrid, lattice: inout ObstacleLattice) -> (safeHard: Double, safeSoft: Double, cost: Double) {
         let r = collision.pathRisk(pts, grid: grid)
-        var obsHard = 0.0, obsSoft = 0.0
+        // 静的障害物は動かないので、予測の不確かさのような時間割引はしない（全区間で厳密に扱う）。
+        // 割り引くと、遠い壁の手前で止まる経路や、壁に向かって進む経路が安全に見えてしまう。
+        var obsHard = 0.0
         if !lattice.isEmpty {
-            for (i, x) in pts.enumerated() {
+            for x in pts {
                 let p = lattice.probability(x)
-                if i <= grid.hardSteps, p > obsHard { obsHard = p }
-                let w = p * grid.timeWeight[min(i, grid.steps)]
-                if w > obsSoft { obsSoft = w }
+                if p > obsHard { obsHard = p }
             }
         }
+        let obsSoft = obsHard
         let safeHard = r.pSafeHard * (1 - obsHard)
         let safeSoft = r.pSafeSoft * (1 - obsSoft)
         let rH = 1 - safeHard, rS = 1 - safeSoft
@@ -494,6 +506,8 @@ public struct PathPlanner: Sendable {
         let lambdaSlow = 0.6
         for i in 1...steps {
             var next: [Int: Node] = [:]
+            // 同じ時刻・同じ経路上の位置の衝突コストは、多くのノードで共有されるのでキャッシュする。
+            var riskCache: [Int: Double] = [:]
             for (key, node) in layers[i - 1] {
                 let s0 = key / L
                 let l0 = key % L
@@ -501,11 +515,18 @@ public struct PathPlanner: Sendable {
                 for l in lo...hi {
                     let r = levels[l]
                     let s1 = min(s0 + Int((r * speed * config.dt / ds).rounded()), maxS)
-                    let x = fine[min(s1, fine.count - 1)]
-                    let pPed = collision.pointRisk(x, timeIndex: i, grid: grid, applyTimeWeight: true)
-                    let pObs = lattice.isEmpty ? 0 : lattice.probability(x) * grid.timeWeight[i]
-                    let risk = 1 - (1 - pPed) * (1 - pObs)
-                    let c = node.cost - log(max(1 - risk, 1e-6)) + lambdaSlow * (1 - r) * config.dt
+                    let riskCost: Double
+                    if let cached = riskCache[s1] {
+                        riskCost = cached
+                    } else {
+                        let x = fine[min(s1, fine.count - 1)]
+                        let pPed = collision.pointRisk(x, timeIndex: i, grid: grid, applyTimeWeight: true)
+                        let pObs = lattice.isEmpty ? 0 : lattice.probability(x)
+                        let risk = 1 - (1 - pPed) * (1 - pObs)
+                        riskCost = -log(max(1 - risk, 1e-6))
+                        riskCache[s1] = riskCost
+                    }
+                    let c = node.cost + riskCost + lambdaSlow * (1 - r) * config.dt
                     let k = s1 * L + l
                     if let ex = next[k], ex.cost <= c { continue }
                     next[k] = Node(cost: c, level: l, parentS: s0, parentLevel: l0)
