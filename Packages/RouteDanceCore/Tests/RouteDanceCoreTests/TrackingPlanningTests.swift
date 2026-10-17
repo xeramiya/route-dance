@@ -107,7 +107,7 @@ private func track(id: Int, position: Vec2, velocity: Vec2) -> Track {
 @Suite struct PlannerTests {
     func plan(_ tracks: [Track], speed: Double = 1.3, goal: Vec2 = Vec2(0, 25)) -> PlannerOutput {
         var planner = PathPlanner()
-        let f = ConstantVelocityPredictor().predict(tracks: tracks, userVelocity: Vec2(0, speed), duration: 5.5)
+        let f = ConstantVelocityPredictor().predict(tracks: tracks, userVelocity: Vec2(0, speed), duration: 7.5)
         return planner.plan(forecasts: f, userVelocity: Vec2(0, speed), goal: goal)
     }
 
@@ -116,8 +116,8 @@ private func track(id: Int, position: Vec2, velocity: Vec2) -> Track {
         #expect(out.best.pSafe > 0.999)
         #expect(!out.best.requiresSlowdown)
         #expect(abs(out.best.shape.k1) < 0.06 && abs(out.best.shape.k2) < 0.06)
-        // 経路長 ≈ v·5s
-        #expect(abs(out.best.arcLength.last! - 1.3 * 5) < 0.05)
+        // 経路長 ≈ v·7s
+        #expect(abs(out.best.arcLength.last! - 1.3 * 7) < 0.05)
         #expect(abs(out.best.lookaheadHeading) < 0.05)
     }
 
@@ -169,14 +169,14 @@ private func track(id: Int, position: Vec2, velocity: Vec2) -> Track {
         config.curvatures = [0]
         config.switchFractions = [1]
         var planner = PathPlanner(config: config)
-        let f = ConstantVelocityPredictor().predict(tracks: tracks, userVelocity: Vec2(0, 1.3), duration: 5.5)
+        let f = ConstantVelocityPredictor().predict(tracks: tracks, userVelocity: Vec2(0, 1.3), duration: 7.5)
         let out = planner.plan(forecasts: f, userVelocity: Vec2(0, 1.3), goal: Vec2(0, 25))
         #expect(out.best.requiresSlowdown)
         #expect(out.best.speedRatio.min()! < 0.6)
-        #expect(out.best.arcLength.last! < 1.3 * 5 - 0.5)
+        #expect(out.best.arcLength.last! < 1.3 * 7 - 0.5)
         // 減速した経路はしない経路より安全。
-        let straight = PathPlanner.rollout(shape: out.best.shape, heading: 0, speed: 1.3, dt: 0.2, steps: 25)
-        let grid = ForecastGrid(forecasts: f, dt: 0.2, duration: 5)
+        let straight = PathPlanner.rollout(shape: out.best.shape, heading: 0, speed: 1.3, dt: 0.2, steps: 35)
+        let grid = ForecastGrid(forecasts: f, dt: 0.2, duration: 7)
         #expect(out.best.pSafe > CollisionModel().pathSafety(straight, grid: grid).pSafe + 0.2)
     }
 
@@ -200,8 +200,8 @@ private func track(id: Int, position: Vec2, velocity: Vec2) -> Track {
 
     @Test func riskFieldMarksPersonAhead() {
         let tr = [track(id: 1, position: Vec2(0, 4), velocity: .zero)]
-        let f = ConstantVelocityPredictor().predict(tracks: tr, userVelocity: Vec2(0, 1.3), duration: 5.5)
-        let grid = ForecastGrid(forecasts: f, dt: 0.2, duration: 5)
+        let f = ConstantVelocityPredictor().predict(tracks: tr, userVelocity: Vec2(0, 1.3), duration: 7.5)
+        let grid = ForecastGrid(forecasts: f, dt: 0.2, duration: 7)
         let field = RiskField.compute(grid: grid, model: CollisionModel(), speed: 1.3)
         func safety(at p: Vec2) -> Double {
             let c = Int((p.x - field.origin.x) / field.cellSize), r = Int((p.y - field.origin.y) / field.cellSize)
@@ -224,7 +224,7 @@ private struct Drive {
     /// ユーザーは (0, speed) で前進し続けるものとして、世界座標の人の動きを毎フレームユーザー座標に直して渡す。
     mutating func step(tracks: [Track], speed: Double = 1.3, goal: Vec2 = Vec2(0, 25), obstacles: ObstacleMap = .empty) -> PlannerOutput {
         let v = Vec2(0, speed)
-        let f = predictor.predict(tracks: tracks, userVelocity: v, duration: 5.5)
+        let f = predictor.predict(tracks: tracks, userVelocity: v, duration: 7.5)
         defer { frame += 1 }
         return planner.plan(forecasts: f, userVelocity: v, goal: goal, obstacles: obstacles, time: Double(frame) / fps)
     }
@@ -320,7 +320,7 @@ private func closestPass(_ path: PlannedPath, person p0: Vec2, velocity: Vec2, d
             let t = Double(i) / 30
             let rel = (personStart + personVelocity * t - userPos).rotated(by: -userHeading)
             let tr = [track(id: 1, position: rel, velocity: personVelocity.rotated(by: -userHeading))]
-            let f = predictor.predict(tracks: tr, userVelocity: Vec2(0, speed), duration: 5.5)
+            let f = predictor.predict(tracks: tr, userVelocity: Vec2(0, speed), duration: 7.5)
             let out = planner.plan(forecasts: f, userVelocity: Vec2(0, speed), goal: Vec2(0, 25), time: t)
             let h = out.best.lookaheadHeading
             let k = out.best.startCurvature
@@ -335,9 +335,9 @@ private func closestPass(_ path: PlannedPath, person p0: Vec2, velocity: Vec2, d
             maxLateral = max(maxLateral, abs(userPos.x))
             #expect(out.best.points[0] == .zero)
         }
-        // 毎フレーム（1/30 秒）の矢印角度の変化は 1°未満、曲率の変化は 0.015 未満（τ=0.5秒の追従）。
-        #expect(maxDHeading < 1 * .pi / 180)
-        #expect(maxDK < 0.015)
+        // 毎フレーム（1/30 秒）の矢印角度の変化は 1°未満、曲率の変化は 0.015 未満（τ=0.6秒の追従）。
+        #expect(maxDHeading < 1 * .pi / 180, "maxDH=\(maxDHeading * 180 / .pi)")
+        #expect(maxDK < 0.015, "maxDK=\(maxDK)")
         // 衝突せず、大きく避けすぎない。
         #expect(maxLateral > 0.2 && maxLateral < 2.5)
     }

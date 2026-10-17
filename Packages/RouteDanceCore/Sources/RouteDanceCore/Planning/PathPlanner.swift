@@ -50,13 +50,13 @@ public struct PlannerOutput: Sendable {
 public struct PathPlanner: Sendable {
     public struct Config: Sendable {
         /// 経路を表示・評価する時間（秒）。経路長は v · horizon。
-        public var horizon = 5.0
+        public var horizon = 7.0
         public var dt = 0.2
         /// 厳密な制約を課す時間（秒）と、それ以降のリスクの重みが 1/e になるまでの時間（秒）。
         public var hardHorizon = 3.0
         public var softDecay = 2.0
-        /// 停止中も経路が見えるよう、計画に使う速度の下限（m/s）。
-        public var minPlanningSpeed = 0.5
+        /// 停止中も経路が見えるよう、計画に使う速度の下限（m/s）。7秒で約5.6m。
+        public var minPlanningSpeed = 0.8
         public var maxPlanningSpeed = 2.5
         /// 曲率の候補（1/m）。k_max(v) = lateralAcceleration / v² を超えるものは使わない。
         public var curvatures: [Double] = [-0.5, -0.35, -0.25, -0.18, -0.12, -0.07, -0.03, 0, 0.03, 0.07, 0.12, 0.18, 0.25, 0.35, 0.5]
@@ -79,7 +79,16 @@ public struct PathPlanner: Sendable {
         public var wCurvatureRate = 4.0
         public var wLateral = 0.3
         /// ゴールへの前進量（経路長で正規化）。
-        public var wGoal = 1.0
+        public var wGoal = 2.0
+        /// 遠回りの抑制: ゴール方向の直線から横に maxDetour（m）以上離れる経路は wDetour·超過² で罰する。
+        /// 大きく回り込むより、減速・停止して待つ方を選ばせる。
+        public var maxDetour = 2.0
+        public var wDetour = 4.0
+        /// 画面（カメラの水平画角）の外へ出る経路の罰。ユーザーに見えない経路を案内しない。
+        /// visibleHalfAngle は NavigationCore が毎フレーム、推定した画角から設定する。
+        public var visibleHalfAngle = 28 * Double.pi / 180
+        public var visibleMargin = 3 * Double.pi / 180
+        public var wOffscreen = 6.0
 
         /// 現在速度の経路で、厳密区間のリスクがこれを超えるときだけ減速を検討する。
         public var slowdownRisk = 0.08
@@ -101,7 +110,9 @@ public struct PathPlanner: Sendable {
         /// 前回の形のリスクが ε のこの倍率を超えたら、保持時間を無視して切り替える。
         public var forceSwitchFactor = 1.5
         /// 表示する曲率・方位・速度が目標へ追従する時定数（秒）。安全が悪化したときは curvatureTauFast。
-        public var curvatureTau = 0.5
+        public var curvatureTau = 0.6
+        /// 表示する曲率の、1秒あたりの変化量の上限（1/m/s）。危険時の速い追従でも急に曲がらないように。
+        public var maxCurvatureChangePerSecond = 0.4
         public var curvatureTauFast = 0.2
         public var headingTau = 0.4
         public var speedTau = 0.4
@@ -112,8 +123,8 @@ public struct PathPlanner: Sendable {
         public var obstacleRadius = 0.35
         /// コンパスの先読み時間（秒）。
         public var lookaheadTime = 1.5
-        /// 経路の初期方位を、端末の前方からこの角度以内に制限する（ラジアン）。
-        public var maxHeadingFromDevice = 60 * Double.pi / 180
+        /// 経路の初期方位を、端末の前方からこの角度以内に制限する（ラジアン）。画角の半分も超えない。
+        public var maxHeadingFromDevice = 25 * Double.pi / 180
         public init() {}
     }
 
@@ -155,8 +166,10 @@ public struct PathPlanner: Sendable {
         var safeHard: Double
         var safeSoft: Double
         var riskCost: Double
-        /// リスク以外のコスト（滑らかさ＋ゴール）。
+        /// リスク以外のコスト（滑らかさ＋ゴール＋遠回り＋画面外）。
         var pathCost: Double
+        /// ゴール方向の直線からの最大の横ずれ（m）。
+        var maxDeviation: Double = 0
         var cost: Double { riskCost + pathCost }
         var rHard: Double { 1 - safeHard }
     }
@@ -179,8 +192,9 @@ public struct PathPlanner: Sendable {
         // 進行方向: 歩いていれば速度の向き、止まっていれば前方（端末の向き）。
         // 歩行者は端末を進行方向へ向けて持つので、推定速度の向きが前方から大きく外れる場合は誤推定とみなして制限する。
         let rawHeading: Double
+        let headingLimit = min(config.maxHeadingFromDevice, max(config.visibleHalfAngle - config.visibleMargin, 0.05))
         if userVelocity.length > 0.3, userVelocity.y > 0 {
-            rawHeading = min(max(userVelocity.heading, -config.maxHeadingFromDevice), config.maxHeadingFromDevice)
+            rawHeading = min(max(userVelocity.heading, -headingLimit), headingLimit)
         } else {
             rawHeading = 0
         }
@@ -218,23 +232,33 @@ public struct PathPlanner: Sendable {
                     let end = pts[pts.count - 1]
                     // ゴールへの前進量。経路長で正規化する。
                     let progress = goalDist > 0.5 ? (goalDist - (goal - end).length) : end.dot(goalDir)
-                    var sumK2 = 0.0, sumDk2 = 0.0, sumE2 = 0.0
+                    var sumK2 = 0.0, sumDk2 = 0.0, sumE2 = 0.0, maxE = 0.0, offscreen = 0.0
                     var prevK = k0
+                    let halfAngle = config.visibleHalfAngle - config.visibleMargin
                     for i in 0..<steps {
                         sumK2 += curv[i] * curv[i]
                         let dk = (curv[i] - prevK) / max(ds, 1e-6)
                         sumDk2 += dk * dk
                         prevK = curv[i]
-                        let e = pts[i + 1].cross(goalDir)
+                        let q = pts[i + 1]
+                        let e = q.cross(goalDir)
                         sumE2 += e * e
+                        maxE = max(maxE, abs(e))
+                        // カメラの足元付近（1.5m以内）は画面に映らないのが普通なので数えない。
+                        if q.length > 1.5 {
+                            let over = abs(q.heading) - halfAngle
+                            if over > 0 { offscreen += over }
+                        }
                     }
                     let n = Double(steps)
+                    let detour = max(0, maxE - config.maxDetour)
                     let pathCost = config.wGoal * (1 - progress / pathLen)
                         + config.wCurvature * sumK2 / n + config.wCurvatureRate * sumDk2 / n + config.wLateral * sumE2 / n
+                        + config.wDetour * detour * detour + config.wOffscreen * offscreen / n
                     let ev = evaluateRisk(pts, grid: grid, lattice: &lattice)
                     scored.append(Scored(
                         shape: shape, points: pts, safeHard: ev.safeHard, safeSoft: ev.safeSoft,
-                        riskCost: ev.cost, pathCost: pathCost
+                        riskCost: ev.cost, pathCost: pathCost, maxDeviation: maxE
                     ))
                 }
             }
@@ -258,12 +282,16 @@ public struct PathPlanner: Sendable {
         var profile = [Double](repeating: 1, count: best.points.count)
         var slowdown = false
 
-        if best.rHard > config.slowdownRisk {
-            // 現在速度では安全にならない。上位の形について、速度プロファイルを最適化する。
+        if best.rHard > config.slowdownRisk || best.maxDeviation > config.maxDetour + 0.3 {
+            // 現在速度では安全にならないか、安全にするには大きく遠回りが要る。
+            // 上位の形と、ゴールへ最も真っ直ぐ向かう形について、速度プロファイル（減速・停止）を最適化する。
             var bestCost = best.cost
             var tried = Set<PathShape>()
             var order = scored.indices.sorted { scored[$0].cost < scored[$1].cost }.prefix(config.slowdownCandidates).map { $0 }
             if !order.contains(chosenIndex) { order.insert(chosenIndex, at: 0) }
+            // リスクを無視したときに最も良い（真っ直ぐゴールへ向かう）形。減速して待つ候補として必ず試す。
+            let direct = scored.indices.sorted { scored[$0].pathCost < scored[$1].pathCost }
+            for idx in direct.prefix(2) where !order.contains(idx) { order.append(idx) }
             for idx in order {
                 let cand = scored[idx]
                 guard tried.insert(cand.shape).inserted else { continue }
@@ -277,7 +305,8 @@ public struct PathPlanner: Sendable {
                     bestCost = cost
                     best = Scored(
                         shape: cand.shape, points: pts, safeHard: ev.safeHard, safeSoft: ev.safeSoft,
-                        riskCost: ev.cost, pathCost: cand.pathCost + config.slowdownPenalty * (1 - meanRatio)
+                        riskCost: ev.cost, pathCost: cand.pathCost + config.slowdownPenalty * (1 - meanRatio),
+                        maxDeviation: cand.maxDeviation
                     )
                     profile = prof
                     slowdown = prof.contains { $0 < 0.99 }
@@ -319,8 +348,11 @@ public struct PathPlanner: Sendable {
         best.safeHard = shownSafeHard
         best.safeSoft = shownSafeSoft
         // 次の候補の始点の曲率も、表示している経路に合わせてローパスで追従させる。
+        // 危険時（fast）も、人が急に向きを変えられる速さを超えないよう、1秒あたりの曲率の変化量に上限を置く。
         let tauK = fast ? config.curvatureTauFast : config.curvatureTau
-        currentCurvature += (1 - exp(-frameDt / tauK)) * (best.shape.k1 - currentCurvature)
+        let step = (1 - exp(-frameDt / tauK)) * (best.shape.k1 - currentCurvature)
+        let maxStep = config.maxCurvatureChangePerSecond * frameDt
+        currentCurvature += min(max(step, -maxStep), maxStep)
 
         // 経路長と先読み点。
         var arc = [0.0]
@@ -556,11 +588,14 @@ public struct GoalContext: Sendable {
     }
 }
 
-/// v1: 端末が向いている方向の、地面上で見える一番奥をゴールとする。
+/// v1: 端末が向いている方向の、画面の一番奥をゴールとする。
+///
+/// 手前の人や障害物で地面が隠れていても、ゴールは手前に縮めない（縮めると経路がその人の手前で止まって揺れる）。
+/// 人や障害物はゴールではなく、計画のリスクで避ける。見えている地面の最遠点が遠ければそこまで伸ばす。
 public struct DeviceForwardGoal: GoalProvider {
     public var maxDistance = 30.0
-    public var minDistance = 4.0
-    private var smoother = ExponentialSmoother(tau: 0.5)
+    public var minDistance = 20.0
+    private var smoother = ExponentialSmoother(tau: 1.0)
     private var time = 0.0
 
     public init() {}

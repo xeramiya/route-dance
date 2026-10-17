@@ -206,7 +206,9 @@ public struct NavigationCore: Sendable {
             depthForGoal?.farthestVisibleGround(heading: heading, geometry: geometryForGoal)
         })
         let plan = measure("plan") {
-            planner.plan(forecasts: forecasts, userVelocity: egoState.velocity, goal: goal, obstacles: obstacles, time: t)
+            // 画面に映る範囲（水平画角の半分）の中に経路を収める。
+            planner.config.visibleHalfAngle = geometry.camera.horizontalFOV / 2
+            return planner.plan(forecasts: forecasts, userVelocity: egoState.velocity, goal: goal, obstacles: obstacles, time: t)
         }
         var field: RiskField?
         if config.computeRiskField {

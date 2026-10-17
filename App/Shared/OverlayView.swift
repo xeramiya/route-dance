@@ -119,15 +119,14 @@ struct OverlayView: View {
 
     // MARK: - ラベル
 
-    /// 暗い背景つきの文字（映像の上でも読めるように）。
+    /// 文字。背景の箱は付けず、細い影で縁取って読めるようにする（デバッグ時は映像が白っぽいので暗い影が効く）。
     private func drawLabel(_ ctx: GraphicsContext, _ text: String, at p: CGPoint, color: Color, size: CGFloat = 10, bold: Bool = false) {
-        let resolved = ctx.resolve(
+        var c = ctx
+        c.addFilter(.shadow(color: .black.opacity(0.6), radius: 1.2))
+        let resolved = c.resolve(
             Text(text).font(.system(size: size, weight: bold ? .bold : .medium, design: .monospaced)).foregroundStyle(color)
         )
-        let sz = resolved.measure(in: CGSize(width: 600, height: 100))
-        let rect = CGRect(x: p.x - sz.width / 2 - 3, y: p.y - sz.height / 2 - 1, width: sz.width + 6, height: sz.height + 2)
-        ctx.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(.black.opacity(0.55)))
-        ctx.draw(resolved, at: p, anchor: .center)
+        c.draw(resolved, at: p, anchor: .center)
     }
 
     // MARK: - 推奨経路
@@ -142,7 +141,7 @@ struct OverlayView: View {
             seg.move(to: a)
             seg.addLine(to: b)
             // 遠いほど細く見えるよう、奥行きに応じて線幅を変える。
-            let depthScale = max(0.35, 1 - pts[i].length / 12)
+            let depthScale = max(0.5, 1 - pts[i].length / 20)
             ctx.stroke(seg, with: .color(.black.opacity(0.35)), style: StrokeStyle(lineWidth: width * depthScale + 3, lineCap: .round))
             ctx.stroke(seg, with: .color(speedColor(plan.speedRatio[i])), style: StrokeStyle(lineWidth: width * depthScale, lineCap: .round))
         }
@@ -197,8 +196,16 @@ struct OverlayView: View {
                 ctx.fill(Path(ellipseIn: r), with: .color(color.opacity(0.5 * alpha)))
                 ctx.stroke(Path(ellipseIn: r), with: .color(.white.opacity(0.9 * alpha)), lineWidth: 1.5)
             }
-            let text = String(format: "#%d %.1fm %.1fm/s N=%.1fs", f.id, f.position.length, speed, f.horizon)
-            drawLabel(ctx, text, at: CGPoint(x: foot.x, y: foot.y + 14), color: color)
+            if f.position.length > forecastRange {
+                // 遠くの人は番号だけを小さく（距離は枠の上に薄く出している）。
+                ctx.draw(
+                    Text("#\(f.id)").font(.system(size: 8, design: .monospaced)).foregroundStyle(color.opacity(0.6)),
+                    at: CGPoint(x: foot.x, y: foot.y + 10), anchor: .center
+                )
+            } else {
+                let text = String(format: "#%d %.1fm %.1fm/s N=%.1fs", f.id, f.position.length, speed, f.horizon)
+                drawLabel(ctx, text, at: CGPoint(x: foot.x, y: foot.y + 14), color: color)
+            }
         }
     }
 
@@ -239,8 +246,12 @@ struct OverlayView: View {
             let far = dist > forecastRange
             let label = String(format: "%.1fm %.0f%%", dist, d.confidence * 100)
             if far {
-                ctx.stroke(Path(rect), with: .color(.cyan.opacity(0.7)), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
-                drawLabel(ctx, String(format: "%.0fm", dist), at: CGPoint(x: rect.midX, y: rect.minY - 8), color: .cyan.opacity(0.9), size: 9)
+                // 遠くの人（予測の対象外）は目立たせない: 細い点線と、影のない小さな薄い文字。
+                ctx.stroke(Path(rect), with: .color(.white.opacity(0.35)), style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                ctx.draw(
+                    Text(String(format: "%.0fm", dist)).font(.system(size: 8, design: .monospaced)).foregroundStyle(.white.opacity(0.45)),
+                    at: CGPoint(x: rect.midX, y: rect.minY - 6), anchor: .center
+                )
             } else {
                 ctx.stroke(Path(rect), with: .color(.cyan.opacity(0.9)), lineWidth: 1.5)
                 drawLabel(ctx, label, at: CGPoint(x: rect.midX, y: rect.minY - 8), color: .cyan)
@@ -248,8 +259,7 @@ struct OverlayView: View {
         }
         for d in unmatched {
             let rect = viewRect(d, fit: fit)
-            ctx.stroke(Path(rect), with: .color(.white.opacity(0.7)), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
-            drawLabel(ctx, "位置不明", at: CGPoint(x: rect.midX, y: rect.minY - 8), color: .white.opacity(0.9), size: 9)
+            ctx.stroke(Path(rect), with: .color(.white.opacity(0.4)), style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
         }
     }
 
