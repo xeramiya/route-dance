@@ -115,6 +115,7 @@ public struct NavigationCore: Sendable {
 
         // カメラ（画角）: 既知ならそれを使い、なければ深度モデルの推定値を平滑化する。
         if let g = input.gravity { ground.update(gravity: g, at: t) }
+        var frameGround: GroundPlane?
         if let d = input.depth {
             latestDepth = d
             let fov = input.knownHorizontalFOV ?? fovSmoother.update(d.camera.horizontalFOV, at: t)
@@ -129,18 +130,23 @@ public struct NavigationCore: Sendable {
             let exclude: [(Double, Double, Double, Double)] = boxes.map { b in
                 (b.minX / w, b.minY / h, b.maxX / w, b.maxY / h)
             }
-            measure("ground") {
-                _ = ground.update(points: d.groundCandidatePoints(excluding: exclude), at: t)
+            frameGround = measure("ground") {
+                ground.update(points: d.groundCandidatePoints(excluding: exclude), at: t)?.plane
             }
         }
         let camForObstacles = camera ?? PinholeCamera(
             horizontalFOV: input.knownHorizontalFOV ?? 65 * .pi / 180, width: input.imageWidth, height: input.imageHeight
         )
         if let d = input.depth {
-            let g = CameraGeometry(camera: camForObstacles, ground: ground.current)
-            let boxes: [PersonDetection] = input.detections ?? lastDetections
-            obstacles = measure("obstacles") {
-                obstacleBuilder.update(depth: d, geometry: g, excluding: boxes, imageWidth: input.imageWidth, imageHeight: input.imageHeight, at: t)
+            // 障害物は、同じフレームの深度に当てはめた地面で判定する。時間方向に平滑化した地面は
+            // その深度のスケールや傾きとずれるので、平らな地面まで障害物に見えてしまう。
+            // 地面が当てはまらなかったフレームは判定しない（前の地図を自己運動で動かして使う）。
+            if let plane = frameGround {
+                let g = CameraGeometry(camera: camForObstacles, ground: plane)
+                let boxes: [PersonDetection] = input.detections ?? lastDetections
+                obstacles = measure("obstacles") {
+                    obstacleBuilder.update(depth: d, geometry: g, excluding: boxes, imageWidth: input.imageWidth, imageHeight: input.imageHeight, at: t)
+                }
             }
         }
         let cam = camera ?? PinholeCamera(
