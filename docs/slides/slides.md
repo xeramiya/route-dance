@@ -26,6 +26,7 @@ fonts:
 <!--
 発表時間 約5分。まずは「何をするアプリか」を一言で。
 自動運転車の実験映像のように、リアルタイム映像の上に「歩くべき一本の道」を重ねるイメージ、と伝える。
+📸 スクリーンショット差し込み予定: 背景に実機アプリ画面（経路オーバーレイ）を薄く敷くと映える。
 -->
 
 ---
@@ -96,6 +97,48 @@ flowchart TD
 </div>
 
 ---
+layout: two-cols
+layoutClass: gap-8
+---
+
+# はじめに：対象デバイス
+
+メインは **iPhone アプリ** です 📱
+
+<div class="mt-6 p-4 rounded-lg bg-white/5 text-sm">
+
+**でも、なぜ macOS でも動くの？**
+
+アプリを **2つ** 作ったからです。
+
+</div>
+
+<div class="mt-4 text-sm opacity-80">
+UI もアルゴリズムも共有。違うのは「どこで動かすか」だけ。
+</div>
+
+::right::
+
+<div class="mt-16">
+
+### macOS 版 = デバッグ専用の双子
+- UI・アルゴリズムは iPhone 版と**共有**
+- 動画ファイルを流して動作を確認できる
+- つまり、**動作はスマホ版とほぼ同じ**
+
+<div class="mt-4 p-4 rounded-lg bg-white/5 text-sm opacity-80">
+⚠️ 端末の性能が違うので、速度や発熱は少し変わる。<br>
+「正しく動くか」は Mac で、「実機でどうか」は iPhone で確かめる。
+</div>
+
+</div>
+
+<!--
+開発を速く回すための工夫。Macなら動画を繰り返し流してアルゴリズムを詰められる。
+コアは純SwiftなのでテストもMacでOK。
+-->
+
+---
 layout: center
 ---
 
@@ -128,6 +171,33 @@ flowchart LR
 
 <!--
 ここが全体像。以降のスライドはこのパイプラインの各ブロックを掘り下げる、と予告する。
+-->
+
+---
+
+# 使っているアルゴリズム 一覧
+
+<div class="text-sm">
+
+| アルゴリズム | どんなもの | どこで使う |
+| --- | --- | --- |
+| **単眼メトリック深度**（MoGe-2） | 1枚の画像から深度・点群・画角を推定するNN | 空間を「画像だけ」で測る起点 |
+| **RANSAC 平面当てはめ** | 外れ値に強い平面推定 | 点群から地面を見つける |
+| **オプティカルフロー**（Lucas-Kanade） | 画素の動きを追う | 自分の移動（自己位置）の推定 |
+| **SE(2) 剛体変換の推定** | 俯瞰での回転+並進を最小二乗 | 自己位置オドメトリ |
+| **人物検出**（Vision） | 画像中の人の矩形を出すOS標準API | 他歩行者を見つける |
+| **カルマンフィルタ** | 位置・速度の時系列推定 | 各歩行者の追跡 |
+| **ByteTrack + ハンガリアン法** | 検出と既存トラックの対応付け | 複数人の追跡（MOT） |
+| **等速度モデル(CVM) + 多峰サンプル** | 速度で外挿し、ばらつきを広げる | 他歩行者の軌道予測 |
+| **CPA（最接近時刻）** | 相対速度から衝突の近さを測る | 何秒先まで予測するか |
+| **サンプリング型経路探索** | 候補を多数生成し評価 | 推奨経路を選ぶ |
+| **ST-graph 上の動的計画法** | 経路に沿った速度を最適化 | 減速区間（黄・赤）の決定 |
+
+</div>
+
+<!--
+この表は「地図」。次からの技術スライドはこの中の主要なものを掘り下げる。
+NNはMoGe-2と(将来の)予測モデルだけ。残りは古典的な幾何・最適化で、純Swiftで自前実装している点を強調。
 -->
 
 ---
@@ -233,6 +303,127 @@ layoutClass: gap-8
 </div>
 
 </div>
+
+---
+
+# 何を「障害物」として扱うか
+
+<div class="grid grid-cols-2 gap-8 mt-4">
+
+<div>
+
+### 障害物 = 他の歩行者
+いま避ける対象は**動く人**に絞っている。
+
+- 各歩行者を**地面座標の点＋半径**で表す<br>（体の半径 + パーソナルスペース ≒ 0.6m）
+- 止まっている物・壁などは v1 では扱わない
+
+<div class="mt-4 text-xs opacity-60">
+将来は地面として通れない領域（段差・車道など）への拡張余地あり。
+</div>
+
+</div>
+
+<div>
+
+### 処理の工夫
+- **未来の位置**を障害物にする<br>今いる場所でなく、予測軌道で避ける
+- **確率として扱う**<br>1点でなくサンプル軌道の集合 → 衝突「確率」で評価
+- **相手は避けてくれない前提**（安全側に倒す）
+- **近い人ほど重視**（CPA で予測を長くとる）
+- **自分の動きと分離**<br>人物の枠内はオドメトリから除外
+
+</div>
+
+</div>
+
+<div class="mt-6 p-3 rounded bg-white/5 text-sm opacity-80">
+ポイント: 障害物は「今その場にいる人」ではなく「<strong>これから数秒間に人がいそうな時空間の領域</strong>」として扱う。
+</div>
+
+<!--
+時刻付きの占有として扱うのが肝。ユーザーがそのセルに到達する時刻に、そこに誰かがいる確率で危険度を測る。
+-->
+
+---
+
+# 画面の見かた（デバッグ詳細表示）
+
+<div class="text-sm opacity-70 mb-3">デバッグモード（デフォルトON）では、各処理が正しく動いているかを一目で確認できる。映像は白っぽく加工してオーバーレイを見やすくする。</div>
+
+<div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mt-2">
+
+<div class="flex items-start gap-3">
+<span class="mt-1 inline-block w-5 h-5 border-2 border-cyan-400 rounded-sm shrink-0"></span>
+<div><b>検出枠</b> … Vision が見つけた人物。枠の上に<b>トラックID</b>と<b>距離</b></div>
+</div>
+
+<div class="flex items-start gap-3">
+<span class="mt-1 inline-block w-5 h-1.5 bg-orange-400 rounded shrink-0"></span>
+<div><b>予測経路</b> … 各歩行者が今後とりそうな<b>サンプル軌道</b>の線（K本）</div>
+</div>
+
+<div class="flex items-start gap-3">
+<span class="mt-1 inline-block w-5 h-1.5 bg-gradient-to-r from-green-500 via-yellow-400 to-red-500 rounded shrink-0"></span>
+<div><b>推奨経路</b> … 緑=今の速度で通れる / 黄・赤=減速が必要</div>
+</div>
+
+<div class="flex items-start gap-3">
+<span class="mt-1 inline-block w-5 h-1.5 bg-white/40 rounded shrink-0"></span>
+<div><b>候補経路</b> … 探索した経路群を薄く表示（P_safe の色）</div>
+</div>
+
+<div class="flex items-start gap-3">
+<span class="mt-1 inline-block w-5 h-5 rounded-sm shrink-0" style="background:linear-gradient(135deg,rgba(255,0,0,.6),rgba(0,255,0,.3))"></span>
+<div><b>ヒートマップ</b> … 地面の各点に「そこへ行くとぶつかる確率」を色で</div>
+</div>
+
+<div class="flex items-start gap-3">
+<span class="mt-1 inline-block w-5 h-5 border border-white/50 shrink-0" style="background:repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(255,255,255,.3) 3px,rgba(255,255,255,.3) 4px)"></span>
+<div><b>地面平面</b> … RANSAC で推定した地面グリッド</div>
+</div>
+
+<div class="flex items-start gap-3">
+<span class="mt-1 text-lg leading-none shrink-0">🧭</span>
+<div><b>コンパス矢印</b> … 進むべき向き（360°回転）</div>
+</div>
+
+<div class="flex items-start gap-3">
+<span class="mt-1 text-lg leading-none shrink-0">⊕</span>
+<div><b>ゴール</b> … 端末の向きの、地面上で見える最も奥の点</div>
+</div>
+
+</div>
+
+<div class="mt-4 p-2 rounded bg-white/5 text-xs opacity-70">
+<b>上部の HUD</b>: 歩行速度 / FPS / 検出数 / 追跡数 / 各処理の時間 / 自己位置の状態 / カメラ高さ / 入力ソース
+</div>
+
+<!--
+📸 スクリーンショット差し込み予定: 実際のデバッグ画面を右側か背景に置き、各要素から引き出し線を引けると理想。
+まずは凡例だけでも、画面を見せたときに「どれが何か」が伝わる。
+-->
+
+---
+
+# （デモ）実際の表示
+
+<div class="mt-8 p-8 rounded-lg bg-white/5 border-2 border-dashed border-white/20 text-center">
+
+📸 **スクリーンショット差し込み予定**
+
+ここに iPhone 実機（またはMacで動画再生）の画面を貼る：<br>
+映像の上に推奨経路（緑→黄→赤）・コンパス矢印・HUD が重なった様子
+
+<div class="text-xs opacity-50 mt-3">
+デバッグモードON（予測経路・衝突確率ヒートマップ・検出枠）版と、通常版の2枚あると良い
+</div>
+
+</div>
+
+<!--
+デモ動画を流せるなら、ここで実機またはMacの画面を見せる。静止画が難しければ動画キャプチャでも可。
+-->
 
 ---
 layout: two-cols

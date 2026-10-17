@@ -242,6 +242,42 @@ private func closestPass(_ path: PlannedPath, person p0: Vec2, velocity: Vec2, d
 }
 
 @Suite struct PathChoiceTests {
+    @Test func doesNotReverseAvoidanceDirectionForTinyJitter() {
+        // 右へ避けている最中、人の横位置が検出ノイズで少し揺れても、避ける向きを左へ反転しない。
+        var d = Drive()
+        // 正面やや左の人 → 右へ避ける形に落ち着く。
+        let base = Vec2(-0.3, 8)
+        var out = d.step(tracks: [track(id: 1, position: base, velocity: Vec2(0, -1.0))])
+        for _ in 0..<30 { out = d.step(tracks: [track(id: 1, position: base, velocity: Vec2(0, -1.0))]) }
+        #expect(out.best.shape.k1 > 0, "right avoidance expected, k1=\(out.best.shape.k1)")
+        // 以降、人の横位置を ±8cm 揺らす。避ける向き（k1 の符号）は反転しないはず。
+        var reversed = false
+        for i in 0..<60 {
+            let jitter = 0.08 * sin(Double(i) * 1.7)
+            out = d.step(tracks: [track(id: 1, position: Vec2(-0.3 + jitter, 6), velocity: Vec2(0, -1.0))])
+            if out.best.shape.k1 < -1e-6 { reversed = true }
+        }
+        #expect(!reversed, "avoidance direction should not flip for small jitter")
+    }
+
+    @Test func reversesWhenCurrentSideBecomesDangerous() {
+        // 右へ避けている最中、右側が本当に塞がれたら（左に避けるしかない）、必要な反転は行う。
+        var d = Drive()
+        // はじめ正面やや左の人 → 右へ避ける。
+        var out = d.step(tracks: [track(id: 1, position: Vec2(-0.4, 8), velocity: Vec2(0, -1.0))])
+        for _ in 0..<30 { out = d.step(tracks: [track(id: 1, position: Vec2(-0.4, 8), velocity: Vec2(0, -1.0))]) }
+        #expect(out.best.shape.k1 > 0)
+        // 右側に静止した壁を置き、左の人は離れていく。右へ避けると壁に当たる → 左へ反転できること。
+        var wall: [Vec2] = []
+        for x in stride(from: 0.3, through: 1.6, by: 0.05) { wall.append(Vec2(x, 5)) }
+        let obstacles = ObstacleMap(points: wall)
+        for _ in 0..<40 {
+            out = d.step(tracks: [track(id: 1, position: Vec2(-2.5, 9), velocity: Vec2(0, -1.0))], obstacles: obstacles)
+        }
+        #expect(out.best.shape.k1 < 0 || out.best.requiresSlowdown,
+                "must be able to reverse (or slow) when the current side is blocked, k1=\(out.best.shape.k1)")
+    }
+
     @Test func everyPathStartsAtOrigin() {
         var d = Drive()
         let tr = [track(id: 1, position: Vec2(-0.2, 7), velocity: Vec2(0, -1.2)), track(id: 2, position: Vec2(2, 4), velocity: Vec2(0, 0.6))]

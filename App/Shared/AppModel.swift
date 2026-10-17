@@ -34,6 +34,10 @@ final class AppModel {
     var showRiskField = true
     var showCandidates = true
     var drawerOpen = false
+    /// 矢印に合わせて回転する WebView を重ねるか。
+    var showWebView = false
+    /// 使い回す WebView。表示/非表示でリセットされないよう1つだけ保持する（初回表示時に生成）。
+    @ObservationIgnored lazy var webViewHolder = WebViewHolder()
     var source: InputSource = .none
     var latest: ProcessedFrame?
     var fps: Double = 0
@@ -80,6 +84,12 @@ final class AppModel {
         frameSource = nil
         isRunning = false
         fpsWindow.removeAll()
+    }
+
+    /// 現在の入力が動画のとき、最初から再生し直す。動画以外では何もしない。
+    func restartVideo() {
+        guard case .video(let url) = source else { return }
+        start(.video(url)) { VideoFileSource(url: url) }
     }
 
     private func receive(_ frame: ProcessedFrame, depthStatus: String?) {

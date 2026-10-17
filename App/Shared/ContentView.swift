@@ -21,11 +21,21 @@ struct ContentView: View {
                 OverlayView(frame: f, debug: model.debugMode, showRiskField: model.showRiskField, showCandidates: model.showCandidates)
                     .ignoresSafeArea()
             }
+            if model.showWebView {
+                RotatingWebView(
+                    holder: model.webViewHolder,
+                    heading: model.latest?.snapshot.plan?.best.lookaheadHeading,
+                    slowdown: model.latest?.snapshot.plan?.best.requiresSlowdown ?? false,
+                    minSpeedRatio: model.latest?.snapshot.plan?.best.speedRatio.min() ?? 1
+                )
+                .ignoresSafeArea()
+            }
             VStack(spacing: 0) {
                 HUDView(frame: model.latest, fps: model.fps, status: model.status, source: model.source, debug: model.debugMode)
                 Spacer()
                 HStack(alignment: .bottom) {
                     menuButton
+                    webViewButton
                     Spacer()
                     CompassView(
                         heading: model.latest?.snapshot.plan?.best.lookaheadHeading,
@@ -60,6 +70,21 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("メニュー")
+    }
+
+    /// 矢印に合わせて回る WebView の表示・非表示を切り替える、ブラウザ風ボタン。
+    private var webViewButton: some View {
+        Button {
+            withAnimation(.spring(duration: 0.35)) { model.showWebView.toggle() }
+        } label: {
+            Image(systemName: model.showWebView ? "safari.fill" : "safari")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(model.showWebView ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                .frame(width: 52, height: 52)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(model.showWebView ? "回る画面を隠す" : "回る画面を表示")
     }
 }
 
@@ -98,6 +123,13 @@ struct DrawerView: View {
                         sourcePicker
                         if model.isRunning {
                             Button("停止", role: .destructive) { model.stop() }
+                        }
+                    }
+                    if case .video = model.source {
+                        Button {
+                            model.restartVideo()
+                        } label: {
+                            Label("動画を最初から再生", systemImage: "arrow.counterclockwise")
                         }
                     }
                     legend

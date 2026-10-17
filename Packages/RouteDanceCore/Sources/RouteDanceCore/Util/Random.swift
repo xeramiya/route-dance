@@ -54,3 +54,38 @@ public struct ExponentialSmoother: Sendable {
         lastTime = nil
     }
 }
+
+/// 角度（ラジアン）の指数移動平均。±π を跨ぐ平滑化のため、最短方向の差分で補間する。
+public struct AngleSmoother: Sendable {
+    public var tau: Double
+    public private(set) var value: Double?
+    private var lastTime: Double?
+
+    public init(tau: Double) {
+        self.tau = tau
+    }
+
+    @discardableResult
+    public mutating func update(_ x: Double, at t: Double) -> Double {
+        guard let v = value, let lt = lastTime else {
+            value = x
+            lastTime = t
+            return x
+        }
+        let dt = max(0, t - lt)
+        let a = tau > 0 ? 1 - exp(-dt / tau) : 1
+        // 最短方向の角度差（-π, π] に正規化してから補間する。
+        var diff = (x - v).truncatingRemainder(dividingBy: 2 * .pi)
+        if diff > .pi { diff -= 2 * .pi }
+        if diff < -.pi { diff += 2 * .pi }
+        let nv = v + a * diff
+        value = nv
+        lastTime = t
+        return nv
+    }
+
+    public mutating func reset() {
+        value = nil
+        lastTime = nil
+    }
+}

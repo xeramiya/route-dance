@@ -111,16 +111,22 @@ public struct PathPlanner: Sendable {
         /// 前回の形も最良の候補も安全なときの δ（滑らかさとゴールの差だけで比べる）。
         public var hysteresisSafe = 0.02
         /// 切り替えてから最低限保持する時間（秒）。
-        public var minHoldTime = 0.7
+        public var minHoldTime = 0.9
         /// 前回の形のリスクが ε のこの倍率を超えたら、保持時間を無視して切り替える。
         public var forceSwitchFactor = 1.5
+        /// 避ける向きの反転（右↔左）に課す追加のヒステリシス。
+        /// 今の形が右へ避けているのに反対（左）の形へ切り替えるのは、ユーザーにとって負担が大きい。
+        /// 反転するのは「今の向きのままではもう危ない」ときだけにしたいので、δ にこの分を上乗せする。
+        /// 今の形が安全（r_hard ≤ ε）なほど上乗せを強くし、危ないほど弱める（必要な反転は妨げない）。
+        public var reversalHysteresis = 0.6
         /// 表示する曲率・方位・速度が目標へ追従する時定数（秒）。安全が悪化したときは curvatureTauFast。
         public var curvatureTau = 0.6
         /// 表示する曲率の、1秒あたりの変化量の上限（1/m/s）。危険時の速い追従でも急に曲がらないように。
         public var maxCurvatureChangePerSecond = 0.4
         public var curvatureTauFast = 0.2
-        public var headingTau = 0.4
-        public var speedTau = 0.4
+        /// 起点の方位・速度の平滑化の時定数（秒）。直進／停止中の首振りを抑えるため長めにする。
+        public var headingTau = 0.7
+        public var speedTau = 0.6
         /// 呼び出し側が時刻を渡さないときの、1回の計画あたりの時間（秒）。
         public var fallbackFrameInterval = 1.0 / 30
 
@@ -280,9 +286,19 @@ public struct PathPlanner: Sendable {
             // 両方とも安全（ε 以下）なら、差は滑らかさとゴールだけ。大きなヒステリシスを掛けると、
             // 避け終わった後も少し曲がった形を保ち続けて、だんだん向きがずれていくので、小さな δ で比べる。
             let bothSafe = cur.rHard <= config.epsilon && best.rHard <= config.epsilon
-            let delta = bothSafe
+            var delta = bothSafe
                 ? config.hysteresisSafe
                 : max(config.hysteresisAbsolute, config.hysteresisRelative * cur.cost)
+            // 避ける向きの反転（右↔左）には追加のヒステリシスを課す。今の形がまだ安全なら、
+            // 反対側へ飛ぶのは大きく損がないと許さない（右を案内中に急に左へ振らない）。
+            // 今の形が危ないほど上乗せを減らし、本当に必要な反転は妨げない。
+            let curDir = cur.shape.k1
+            let bestDir = best.shape.k1
+            let reverses = curDir * bestDir < -1e-9 && abs(curDir) > 1e-9
+            if reverses {
+                let safetyScale = max(0, 1 - cur.rHard / max(config.forceSwitchFactor * config.epsilon, 1e-6))
+                delta += config.reversalHysteresis * safetyScale
+            }
             forced = cur.rHard > config.forceSwitchFactor * config.epsilon && best.cost < cur.cost - 0.05
             let held = now - lastSwitchTime < config.minHoldTime
             let better = best.cost + delta < cur.cost
@@ -617,6 +633,8 @@ public struct DeviceForwardGoal: GoalProvider {
     public var maxDistance = 30.0
     public var minDistance = 20.0
     private var smoother = ExponentialSmoother(tau: 1.0)
+    /// ゴールの方位も平滑化する。端末の手ブレがそのままゴールの横位置になり、経路が左右に揺れるのを防ぐ。
+    private var headingSmoother = AngleSmoother(tau: 1.0)
     private var time = 0.0
 
     public init() {}
@@ -625,6 +643,7 @@ public struct DeviceForwardGoal: GoalProvider {
         let d = context.farthestVisibleGround(context.deviceHeading) ?? maxDistance
         time += 1
         let s = smoother.update(min(max(d, minDistance), maxDistance), at: time * 0.1)
-        return Vec2.fromHeading(context.deviceHeading, length: s)
+        let heading = headingSmoother.update(context.deviceHeading, at: time * 0.1)
+        return Vec2.fromHeading(heading, length: s)
     }
 }

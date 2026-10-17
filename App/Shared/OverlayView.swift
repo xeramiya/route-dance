@@ -132,9 +132,17 @@ struct OverlayView: View {
     // MARK: - 推奨経路
 
     /// 推奨経路: 速度比で緑 → 黄 → 赤。画面外・カメラ直下の点も繋いで描く。
+    /// 経路長が実質0（＝全区間で停止を選び、進める経路が無い）ときは全体を真っ赤にして「止まれ」を示す。
+    ///
+    /// 始点は候補経路（`candidates`）と同じく、地面原点をそのまま投影した位置に置く（画面下端への固定はしない）。
+    /// 候補と推奨で始点・傾きを揃え、経路全体が地面の投影に沿って同じように傾くようにする。
     private func drawPlan(_ plan: PlannedPath, ctx: GraphicsContext, proj: GroundProjector, width: CGFloat) {
         let pts = plan.points
         guard pts.count > 1 else { return }
+        // 総経路長。減速プロファイルが全ステップ停止を選ぶと全点が原点付近に潰れ、長さがほぼ0になる。
+        let totalLength = plan.arcLength.last ?? 0
+        let stopped = totalLength < 0.1
+
         for i in 1..<pts.count {
             guard let (a, b) = proj.segment(pts[i - 1], pts[i]) else { continue }
             var seg = Path()
@@ -142,9 +150,27 @@ struct OverlayView: View {
             seg.addLine(to: b)
             // 遠いほど細く見えるよう、奥行きに応じて線幅を変える。
             let depthScale = max(0.5, 1 - pts[i].length / 20)
+            let color = stopped ? Color(red: 1, green: 0, blue: 0) : speedColor(plan.speedRatio[i])
             ctx.stroke(seg, with: .color(.black.opacity(0.35)), style: StrokeStyle(lineWidth: width * depthScale + 3, lineCap: .round))
-            ctx.stroke(seg, with: .color(speedColor(plan.speedRatio[i])), style: StrokeStyle(lineWidth: width * depthScale, lineCap: .round))
+            ctx.stroke(seg, with: .color(color), style: StrokeStyle(lineWidth: width * depthScale, lineCap: .round))
         }
+        // 経路が点に潰れて線が全く見えないときのために、投影した始点に赤い停止マーカーを出す。
+        if stopped {
+            let anchor = proj.point(pts[0])
+                ?? firstVisibleSegment(pts, proj: proj)?.0
+                ?? CGPoint(x: proj.viewSize.width / 2, y: proj.viewSize.height)
+            let r = CGRect(x: anchor.x - width, y: anchor.y - width, width: width * 2, height: width * 2)
+            ctx.fill(Path(ellipseIn: r), with: .color(Color(red: 1, green: 0, blue: 0)))
+            ctx.stroke(Path(ellipseIn: r), with: .color(.white), lineWidth: 2)
+        }
+    }
+
+    /// 経路の最初の、近平面クリップ後に描ける線分（の画面座標）を返す。始点アンカーの基準に使う。
+    private func firstVisibleSegment(_ pts: [Vec2], proj: GroundProjector) -> (CGPoint, CGPoint)? {
+        for i in 1..<pts.count {
+            if let seg = proj.segment(pts[i - 1], pts[i]) { return seg }
+        }
+        return nil
     }
 
     // MARK: - 他歩行者の予測
