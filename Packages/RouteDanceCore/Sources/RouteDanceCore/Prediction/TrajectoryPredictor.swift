@@ -11,8 +11,12 @@ public struct PedestrianForecast: Sendable, Identifiable {
     /// samples[k][i] は、サンプル k の時刻 times[i] での位置。
     public var samples: [[Vec2]]
     public var weights: [Double]
-    /// 時刻 times[i] での位置の不確かさ（標準偏差、m）。サンプルの周りに加える。
+    /// 時刻 times[i] での位置の不確かさ（標準偏差、m）。進行方向と横の中間の等方近似（表示と互換のため残す）。
     public var sigma: [Double]
+    /// 進行方向の不確かさ σ_∥（m）。空なら `sigma` で代用（等方）。
+    public var sigmaAlong: [Double] = []
+    /// 進行方向に直交する向きの不確かさ σ_⊥（m）。空なら `sigma` で代用（等方）。
+    public var sigmaCross: [Double] = []
     /// CPAベースの表示ホライズン N（秒）。
     public var horizon: Double
     /// ユーザーとの最接近時刻と距離（等速を仮定）。
@@ -31,11 +35,15 @@ public struct PedestrianForecast: Sendable, Identifiable {
         return samples.map { s in s[i0] * (1 - a) + s[i1] * a }
     }
 
-    public func sigma(at t: Double) -> Double {
-        guard !sigma.isEmpty else { return 0 }
+    public func sigma(at t: Double) -> Double { value(sigma, at: t) }
+    public func sigmaAlong(at t: Double) -> Double { sigmaAlong.isEmpty ? sigma(at: t) : value(sigmaAlong, at: t) }
+    public func sigmaCross(at t: Double) -> Double { sigmaCross.isEmpty ? sigma(at: t) : value(sigmaCross, at: t) }
+
+    private func value(_ a: [Double], at t: Double) -> Double {
+        guard !a.isEmpty else { return 0 }
         let step = times.count > 1 ? times[1] - times[0] : 1
-        let i = min(max(Int((t / step).rounded()), 0), sigma.count - 1)
-        return sigma[i]
+        let i = min(max(Int((t / step).rounded()), 0), a.count - 1)
+        return a[i]
     }
 }
 
@@ -90,11 +98,17 @@ public struct ConstantVelocityPredictor: TrajectoryPredictor {
     public var name: String { "CVM-S" }
     public var dt = 0.2
     /// 向きの標準偏差（ラジアン）。止まりかけの人ほど向きが定まらないので速さで割り増す。
-    public var headingStd = 0.25
-    public var speedRelativeStd = 0.2
-    /// 位置の不確かさ σ(t) = σ₀ + k·t。
-    public var sigma0 = 0.15
-    public var sigmaRate = 0.12
+    /// 位置の不確かさ σ_⊥ にも向きのばらつきが含まれるので、二重計上を避けて小さめにする。
+    public var headingStd = 0.15
+    public var speedRelativeStd = 0.12
+    /// 歩いている人の位置の不確かさ。進行方向 σ_∥(t) = a₀ + a₁·t、横 σ_⊥(t) = c₀ + c₁·t。
+    public var sigmaAlong0 = 0.1
+    public var sigmaAlongRate = 0.15
+    public var sigmaCross0 = 0.1
+    public var sigmaCrossRate = 0.06
+    /// 止まっている人はどちらへ動き出すか分からないので等方: σ(t) = s₀ + s₁·t。
+    public var sigmaStationary0 = 0.15
+    public var sigmaStationaryRate = 0.15
     /// これより遅い人は止まっているとみなす（m/s）。
     public var stationarySpeed = 0.25
     public var horizon = CPAHorizon()
@@ -111,8 +125,8 @@ public struct ConstantVelocityPredictor: TrajectoryPredictor {
             }
         }
         // 左右に大きく曲がる可能性（すれ違いで避ける動き）も少し含める。
-        g.append((-2.5, 0, 0.03))
-        g.append((2.5, 0, 0.03))
+        g.append((-2.0, 0, 0.02))
+        g.append((2.0, 0, 0.02))
         let total = g.reduce(0) { $0 + $1.2 }
         return g.map { ($0.0, $0.1, $0.2 / total) }
     }()
@@ -145,10 +159,14 @@ public struct ConstantVelocityPredictor: TrajectoryPredictor {
                     weights.append(g.w)
                 }
             }
-            let sigma = times.map { sigma0 + sigmaRate * $0 + (speed < stationarySpeed ? 0.25 * $0 : 0) }
+            let isStationary = speed < stationarySpeed
+            let along = times.map { isStationary ? sigmaStationary0 + sigmaStationaryRate * $0 : sigmaAlong0 + sigmaAlongRate * $0 }
+            let cross = times.map { isStationary ? sigmaStationary0 + sigmaStationaryRate * $0 : sigmaCross0 + sigmaCrossRate * $0 }
+            let sigma = zip(along, cross).map { (($0 * $0 + $1 * $1) / 2).squareRoot() }
             return PedestrianForecast(
                 id: tr.id, position: p0, velocity: v0, times: times, samples: samples, weights: weights,
-                sigma: sigma, horizon: h.horizon, timeToClosestApproach: h.tCPA, closestApproachDistance: h.dCPA
+                sigma: sigma, sigmaAlong: along, sigmaCross: cross,
+                horizon: h.horizon, timeToClosestApproach: h.tCPA, closestApproachDistance: h.dCPA
             )
         }
     }

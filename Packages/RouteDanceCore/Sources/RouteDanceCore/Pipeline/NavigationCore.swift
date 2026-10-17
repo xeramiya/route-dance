@@ -200,7 +200,7 @@ public struct NavigationCore: Sendable {
             depthForGoal?.farthestVisibleGround(heading: heading, geometry: geometryForGoal)
         })
         let plan = measure("plan") {
-            planner.plan(forecasts: forecasts, userVelocity: egoState.velocity, goal: goal, obstacles: obstacles)
+            planner.plan(forecasts: forecasts, userVelocity: egoState.velocity, goal: goal, obstacles: obstacles, time: t)
         }
         var field: RiskField?
         if config.computeRiskField {
