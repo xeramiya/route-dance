@@ -149,3 +149,36 @@ struct SyntheticScene {
         #expect(state!.isTracking)
     }
 }
+
+@Suite struct OpticalFlowTests {
+    /// 滑らかなテクスチャ画像。
+    func texture(width: Int, height: Int, shift: SIMD2<Double>) -> GrayImage {
+        var px = [Float](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                let u = Double(x) - shift.x, v = Double(y) - shift.y
+                let val = 0.5 + 0.2 * sin(u * 0.13) * cos(v * 0.11) + 0.15 * sin((u + v) * 0.07) + 0.1 * cos(u * 0.05 - v * 0.09)
+                px[y * width + x] = Float(val)
+            }
+        }
+        return GrayImage(width: width, height: height, pixels: px)
+    }
+
+    @Test func tracksTranslation() {
+        let flow = SparseOpticalFlow()
+        let a = texture(width: 160, height: 200, shift: .zero)
+        let b = texture(width: 160, height: 200, shift: SIMD2(6.5, -9.25))
+        let pa = flow.pyramid(a), pb = flow.pyramid(b)
+        var flowConfig = SparseOpticalFlow.Config()
+        flowConfig.minEigenvalue = 1e-6
+        let pts = SparseOpticalFlow(config: flowConfig).selectFeatures(in: a, spacing: 12) { x, y in x > 20 && x < 140 && y > 20 && y < 180 }
+        #expect(pts.count > 30)
+        let tracked = flow.track(points: pts, prev: pa, next: pb)
+        let ok = zip(pts, tracked).compactMap { p, q in q.map { $0 - p } }
+        #expect(Double(ok.count) > Double(pts.count) * 0.8)
+        let meanX = ok.map(\.x).reduce(0, +) / Float(ok.count)
+        let meanY = ok.map(\.y).reduce(0, +) / Float(ok.count)
+        #expect(abs(meanX - 6.5) < 0.2)
+        #expect(abs(meanY + 9.25) < 0.2)
+    }
+}

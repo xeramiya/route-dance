@@ -108,6 +108,11 @@ public struct NavigationCore: Sendable {
         if let d = input.depth {
             latestDepth = d
             let fov = input.knownHorizontalFOV ?? fovSmoother.update(d.camera.horizontalFOV, at: t)
+            if camera == nil, input.knownHorizontalFOV == nil {
+                // 仮の画角で作ったトラックは位置がずれているので、最初の推定で作り直す。
+                tracker.reset()
+                previousGeometry = nil
+            }
             camera = PinholeCamera(horizontalFOV: fov, width: input.imageWidth, height: input.imageHeight)
             let w = Double(input.imageWidth), h = Double(input.imageHeight)
             let boxes: [PersonDetection] = input.detections ?? lastPersons.map(\.detection)

@@ -1,0 +1,114 @@
+# XcodeGen の設定。`xcodegen generate` で RouteDance.xcodeproj を作る（.xcodeproj はGit管理しない）。
+#
+# 対応OSは iOS 27 / macOS 27。
+# iOS 27 SDK と macOS 27 を入れるまでは、次のように一時的に 26.0 でビルドする:
+#   DEPLOYMENT_IOS=26.0 DEPLOYMENT_MACOS=26.0 xcodegen generate
+name: RouteDance
+
+options:
+  bundleIdPrefix: dev.xeramiya
+  deploymentTarget:
+    iOS: ${DEPLOYMENT_IOS}
+    macOS: ${DEPLOYMENT_MACOS}
+  createIntermediateGroups: true
+  developmentLanguage: ja
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+
+packages:
+  RouteDanceCore:
+    path: Packages/RouteDanceCore
+
+targets:
+  RouteDance-iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: App/Shared
+      - path: App/iOS
+      - path: Models
+        optional: true
+        buildPhase: resources
+        type: folder
+        excludes:
+          - "*_16x9.mlpackage"
+          - "*_landscape.mlpackage"
+    dependencies:
+      - package: RouteDanceCore
+        product: RouteDanceCore
+      - package: RouteDanceCore
+        product: RouteDancePerception
+    info:
+      path: App/iOS/Info.plist
+      properties:
+        CFBundleDisplayName: RouteDance
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities: [arm64]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIStatusBarHidden: true
+        NSCameraUsageDescription: 周囲の歩行者を検出して、ぶつからない経路を表示するためにカメラを使います。映像は端末の外に送信しません。
+        NSPhotoLibraryUsageDescription: 撮影済みの動画を読み込んで、経路予測の動作を確認するために使います。
+        NSMotionUsageDescription: 歩行中の端末の向きと回転を推定するために使います。
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.xeramiya.routedance
+        TARGETED_DEVICE_FAMILY: "1"
+        PRODUCT_NAME: RouteDance
+
+  RouteDance-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: App/Shared
+      - path: App/macOS
+      - path: Models
+        optional: true
+        buildPhase: resources
+        type: folder
+        excludes:
+          - "*_16x9.mlpackage"
+          - "*_landscape.mlpackage"
+    dependencies:
+      - package: RouteDanceCore
+        product: RouteDanceCore
+      - package: RouteDanceCore
+        product: RouteDancePerception
+    info:
+      path: App/macOS/Info.plist
+      properties:
+        CFBundleDisplayName: RouteDance
+        LSApplicationCategoryType: public.app-category.developer-tools
+    entitlements:
+      path: App/macOS/RouteDance.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.files.user-selected.read-only: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.xeramiya.routedance.mac
+        PRODUCT_NAME: RouteDance
+        ENABLE_HARDENED_RUNTIME: YES
+
+schemes:
+  RouteDance-iOS:
+    build:
+      targets:
+        RouteDance-iOS: all
+    run:
+      config: Debug
+  RouteDance-macOS:
+    build:
+      targets:
+        RouteDance-macOS: all
+    run:
+      config: Debug
+    test:
+      config: Debug
