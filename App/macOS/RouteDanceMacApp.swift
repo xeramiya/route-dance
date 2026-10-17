@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 
 @main
 struct RouteDanceMacApp: App {
-    @State private var model = AppModel()
+    @State private var model: AppModel
 
     var body: some Scene {
         WindowGroup {
@@ -21,16 +21,19 @@ struct RouteDanceMacApp: App {
     }
 
     init() {
+        // @State の初期値を init 内で使うには、先に State(initialValue:) で入れておく必要がある。
+        let initial = AppModel()
+        _model = State(initialValue: initial)
         // 開発用: 起動引数 `-openVideo <path>` で動画を自動で開く（UIの動作確認用）。
         if let i = CommandLine.arguments.firstIndex(of: "-openVideo"), i + 1 < CommandLine.arguments.count {
             let url = URL(fileURLWithPath: CommandLine.arguments[i + 1])
-            let m = model
+            let m = initial
             Task { @MainActor in m.openVideo(url) }
         }
         // 開発用: `-snapshot <path>` で、数秒ごとに画面を PNG に書き出す（画面収録の権限なしで確認するため）。
         if let i = CommandLine.arguments.firstIndex(of: "-snapshot"), i + 1 < CommandLine.arguments.count {
             let path = CommandLine.arguments[i + 1]
-            let m = model
+            let m = initial
             Task { @MainActor in
                 for n in 0..<6 {
                     try? await Task.sleep(for: .seconds(2))
